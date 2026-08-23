@@ -144,8 +144,19 @@ int rtw_dmac_pre_init(struct rtw_io *io) {
     return dle_init_dlfw(io);
 }
 
-/* hci_func_en (init.c): enable USB HCI TX/RX DMA — now holds, DMAC is on. */
+/* usb_pre_init_8852a (init.c intf_pre_init) — runs AFTER dmac_pre_init, BEFORE enable_cpu.
+ * Releases the USB TX/RX DMA from reset and enables USB HCI DMA. WITHOUT this the H2C path
+ * never comes up (hardware: H2C_PATH_RDY stays 0), even with DMAC/DLE initialised. */
+#define R_AX_USB_HOST_REQUEST_2 0x1078
+#define B_R_USBIO_MODE          BIT(4)
+#define R_AX_USB_WLAN0_1        0x1174
+#define B_USBRX_RST             BIT(9)
+#define B_USBTX_RST             BIT(8)
 int rtw_hci_func_en(struct rtw_io *io) {
+    io->reg_write32(io->ctx, R_AX_USB_HOST_REQUEST_2,
+                    io->reg_read32(io->ctx, R_AX_USB_HOST_REQUEST_2) | B_R_USBIO_MODE);
+    io->reg_write32(io->ctx, R_AX_USB_WLAN0_1,
+                    io->reg_read32(io->ctx, R_AX_USB_WLAN0_1) & ~(B_USBRX_RST | B_USBTX_RST));
     uint32_t v = io->reg_read32(io->ctx, R_AX_HCI_FUNC_EN) | B_HCI_TXDMA_EN | B_HCI_RXDMA_EN;
     return io->reg_write32(io->ctx, R_AX_HCI_FUNC_EN, v);
 }

@@ -48,3 +48,14 @@ Ran the ported chain on the live AX56 via the Deno/usbfs runner (same primitives
 - ⚠️ **fwdl without full init WEDGES the chip** (all reg reads → 0xffffffff); recover by physical replug.
 
 Net: hardware confirms the remaining work is MAC sys_init/DMAC init, and that it cannot be skipped.
+
+### Second chip run (dmac_pre_init + dle + usb_pre_init added)
+- ✅ **DMAC + DLE(DLFW) init validated on silicon**: WDE_INI(0x8D00)=0x3, PLE_INI(0x9100)=0x3 (init-ready).
+- ✅ **HCI_FUNC_EN(0x8380) now holds = 0x3** (was 0x0) — root cause fixed: DMAC must be enabled first.
+- ✅ usb_pre_init: USB TX/RX RST released (0x1174), matching driver intf_pre_init order.
+- ⛔ **H2C_PATH_RDY STILL does not set** after the full documented pre-init (power-on → dmac_pre_init →
+  usb_pre_init/hci → disable/enable_cpu). This is the current hard wall.
+- Confounders to rule out on a FRESH replug: PLATFORM_ENABLE read 0x54f on entry (WCPU_EN already set from
+  prior partial runs — CPU may not be getting a clean reset); `disable_fw_watchdog` was omitted from
+  disable_cpu; ROM boot may need a longer settle or a step not obvious from static reading. Needs a
+  clean-chip baseline + deeper CPU-boot investigation before more attempts (2-attempt rule hit here).
