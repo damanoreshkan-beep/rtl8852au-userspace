@@ -135,7 +135,33 @@ Remaining before an on-chip run: map the cut register → CAV/CBV/CCV (read conf
 GPIO_MUXCFG/RSV_CTRL — noted in rtw_pwron.c); then `mac_enable_fw` (CPU_ON).
 Order: **power-on → enable_fw(CPU_ON) → mac_fwdl → MAC/BB/RF init → monitor enable → channel hop → RX**.
 
+## 6. dmac_pre_init + dle_init(DLFW) — the block that lifts H2C_PATH_RDY (fully mapped)
+
+Hardware pinpointed this as the missing step before fwdl (see docs/STATUS.md on-chip findings). Full recipe:
+
+**dmac_pre_init (8852A), before enable_cpu:**
+- `W32(R_AX_DMAC_FUNC_EN=0x8400, MAC_FUNC_EN(BIT30)|DMAC_FUNC_EN(BIT29)|DISPATCHER_EN(BIT18)|PKT_BUF_EN(BIT22))`
+- `W32(R_AX_DMAC_CLK_EN=0x8404, DISPATCHER_CLK_EN(BIT18))`
+- then `dle_init(MAC_AX_QTA_DLFW)`
+- ROOT CAUSE the first on-chip try failed: HCI_FUNC_EN(0x8380) was written BEFORE 0x8400 — it is in the DMAC
+  clock domain and will not hold until DMAC_FUNC_EN is set.
+
+**dle_init(DLFW) — USB 8852A config** (dle.c `dle_mem_usb_8852a` DLFW = wde_size4/ple_size4/wde_qt4/ple_qt13):
+- wde_size4: page=64B, lnk=0, unlnk=4096.  ple_size4: page=128B, lnk=64, unlnk=1472.
+- wde_qt4 (min=max) all 0 (wcpu patched from ext_mode).  ple_qt13 (min=max): c2h=16, h2c=48, rest 0.
+- sequence: `dle_func_en(DIS)` [DMAC_FUNC_EN clear DLE_WDE_EN|DLE_PLE_EN] → `dle_clk_en(EN)` [DMAC_CLK_EN set
+  DLE_WDE_CLK_EN|DLE_PLE_CLK_EN] → `dle_mix_cfg` → `wde_quota_cfg`+`ple_quota_cfg` → `dle_func_en(EN)` → poll done.
+- dle_mix_cfg: R_AX_WDE_PKTBUF_CFG (page_sel + start_bound=0 + free_page_num=lnk); R_AX_PLE_PKTBUF_CFG
+  (page_sel + start_bound=(wde lnk+unlnk)*pgsz/DLE_BOUND_UNIT + free_page_num=lnk).
+- wde_quota_cfg: R_AX_WDE_QTA0/1/3/4_CFG (min|max hif/wcpu/pkt_in/cpu_io). ple_quota_cfg: R_AX_PLE_QTA*.
+- sanity dle_init enforces: dle_used_size(wde,ple) == fifo_size - dle_rsvd_size — host-testable.
+
+**Then**: hci_func_en (R_AX_HCI_FUNC_EN=0x8380 |= HCI_TXDMA_EN(BIT0)|HCI_RXDMA_EN(BIT1)) → enable_cpu(dlfw=1)
+→ fwdl. Remaining work = pull the ~15 WDE/PLE register addresses + write rtw_dle.c (host-test the used_size
+sanity, then on-chip). This is the LAST block before firmware downloads on-chip.
+
 ## Bottom line
-Nothing here needs root or a kernel. Power-on and fw-download are both ported and **host-verified byte-exact**;
-what remains is integration (wire native-bridge reg8/reg32/tx to libusb), `mac_enable_fw`, then the first
-on-chip run, followed by the RX/monitor block (§4). Every remaining [?] has a file address.
+Nothing here needs root or a kernel. Power-on and fw-download are both ported and **host-verified byte-exact**,
+and power-on + enable_cpu are **validated on real silicon**. The one remaining block before fwdl runs on-chip
+is dmac_pre_init + dle_init(DLFW) (§6, fully mapped). After that: MAC/BB/RF init + monitor RX (§4). Every
+remaining step has a file address.
