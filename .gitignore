@@ -1,0 +1,10 @@
+# Realtek firmware — fetch from linux-firmware, not vendored (see README)
+native/fw/*.bin
+# termux-usb runtime callback the tool writes
+tool/.cb.sh
+tool/out*.txt
+# host test binaries / build artifacts
+native/test/*.o
+*.o
+*.so
+a.out
