@@ -15,7 +15,8 @@ Legend: ✅ proven on hardware this session · 🟡 code written, untested on-ai
 | Power-on sequence         | ✅ | `rtw_pwron.c` + `native/test` | engine + NIC table ported 1:1, host-verified (16 USB2 ops, filtering correct) |
 | FW header/section parse   | ✅ | `rtw_fwdl.c::fwhdr_parse` | validated byte-exact on real fw (RESEARCH §3b) |
 | FW download encoder       | ✅ | `rtw_fwdl.c` + `native/test` | compiled + byte-verified on real fw: 194 pkts, txdesc/fwcmd/chunking all correct |
-| FW download ON HARDWARE   | ⛔ | needs power-on first | encoder ready; not yet run against the chip |
+| dmac_pre_init + dle(DLFW)  | ✅ | `rtw_dle.c` + `native/test` | ported; host-verified: used_size==fifo(458752), bound=32, h2c=48, HCI-DMA holds |
+| FW download ON HARDWARE    | ⛔ | ready to re-test on chip | full chain wired (pwron→dmac/dle→hci→cpu→fwdl); needs wifi-mode + clean chip |
 | MAC/BB/RF init + calib     | ⛔ | — | THE big remaining block; huge reg tables + RF cal, needs on-HW iteration |
 | RX descriptor strip        | ✅ | `rtw_rx.c` + `native/test` | host-verified (offset=rxdlen+drv*8+shift, rate/crc) |
 | Monitor(sniffer) enable    | 🟡 | `rtw_rx.c::rtw_monitor_enable` | R_AX_RX_FLTR_OPT 0xCE20 SNIFFER_MODE; written, not HW-verified |

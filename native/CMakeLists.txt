@@ -15,7 +15,7 @@ target_compile_definitions(usb1.0 PRIVATE HAVE_CONFIG_H _GNU_SOURCE)
 
 add_library(ax56 SHARED
     cpp/native-bridge.cpp cpp/modeswitch.cpp cpp/frame-parser.cpp cpp/channel-hop.cpp
-    cpp/rtw_pwron.c cpp/rtw_cpu.c cpp/rtw_fwdl.c cpp/rtw_rx.c cpp/fw_blob.c)
+    cpp/rtw_pwron.c cpp/rtw_cpu.c cpp/rtw_dle.c cpp/rtw_fwdl.c cpp/rtw_rx.c cpp/fw_blob.c)
 target_include_directories(ax56 PRIVATE ${LIBUSB})
 target_link_libraries(ax56 usb1.0 android log)
 # config.h: use the one from libusb/android/, do not hand-write it.

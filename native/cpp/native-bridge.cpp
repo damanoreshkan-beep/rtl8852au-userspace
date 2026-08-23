@@ -21,6 +21,8 @@ void ax56_parse_frame(const uint8_t *buf, int len);         // frame-parser.cpp 
 extern "C" {
     int     rtw_pwron(struct rtw_io *io, uint8_t cut_msk, void (*delay_us)(uint32_t));
     uint8_t rtw_read_cut(struct rtw_io *io);
+    int     rtw_dmac_pre_init(struct rtw_io *io);   // DMAC_FUNC_EN + DLE(DLFW)
+    int     rtw_hci_func_en(struct rtw_io *io);      // HCI TX/RX DMA (needs DMAC on first)
     int     rtw_disable_cpu(struct rtw_io *io);
     int     rtw_enable_cpu(struct rtw_io *io, int dlfw);
     int     rtw_fwdl(struct rtw_io *io, const uint8_t *fw, uint32_t len);
@@ -101,6 +103,9 @@ Java_world_anubis_ax56_UsbController_nativeInitDriver(JNIEnv *, jobject, jint fd
     if (rtw_pwron(&io, (uint8_t)(1u << cut), io_delay_us) != 0) {
         LOGE("power-on failed"); goto fail;
     }
+    // DMAC + DLE(DLFW) packet-buffer init — lifts H2C_PATH_RDY; then HCI DMA (holds now).
+    if (rtw_dmac_pre_init(&io) != 0) { LOGE("dmac/dle init failed"); goto fail; }
+    rtw_hci_func_en(&io);
     rtw_disable_cpu(&io);
     if (rtw_enable_cpu(&io, 1) != 0) { LOGE("enable_cpu failed"); goto fail; }
 
