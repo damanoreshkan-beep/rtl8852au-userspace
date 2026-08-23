@@ -67,7 +67,17 @@ chip too (WCPU_EN set by the ROM's own boot). So the "dirty chip" theory is WRON
 reproducible from a clean state. STOPPING hardware iteration (2-attempt rule firmly hit).
 
 **Honest assessment of the H2C_PATH_RDY wall:** power-on, DMAC, DLE(DLFW), USB/HCI init are all validated on
-silicon — a large, real result. But the CPU→download handshake does not arm. Cracking it likely needs more
-than static source reading: candidates are (a) the mac_pwr_switch scoreboard NOTIFY write, (b) a genuine CPU
-core reset (not just WCPU_EN toggle) — disable_fw_watchdog / a reset bit, (c) a USB capture of the Windows
-driver's fwdl to diff the exact register/packet order. This is the boundary where blind porting stops paying.
+silicon — a large, real result. But the CPU→download handshake does not arm.
+
+**Five distinct hypotheses tested on hardware, all fail identically:** (1) no DMAC → added DMAC; (2) DMAC+DLE
+→ DLE init-ready but H2C 0; (3) + usb_pre_init (USB TX/RX RST released) → H2C 0; (4) fresh replugged chip →
+identical; (5) **+ full power-OFF cold reset first** (PLATFORM_ENABLE 0x54f→0x54c: WCPU_EN cleared, confirmed
+cold) → power-on/DMAC/DLE/HCI all back up, **H2C_PATH_RDY still 0**. So it is NOT: missing DMAC/DLE, USB reset,
+a dirty chip, or a warm CPU. The wall is robust and reproducible.
+
+**Verdict:** cracking the fwdl handshake is beyond static source-reading + hypothesis-testing on this bench.
+The whole init up to fwdl is correct and validated; something in the CPU→download arming is either undocumented
+in the vendor source path we can see, or needs the exact on-the-wire order (a USB capture of the working driver)
+or hardware/secure-boot state we can't reach no-root. **No-root userspace monitor mode is not achievable via
+this route in reasonable effort** — the kernel driver + root remains the only proven monitor path for 8852AU.
+This repo stands as a validated bring-up up to the fwdl wall, honestly documented.
