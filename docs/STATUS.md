@@ -59,3 +59,15 @@ Net: hardware confirms the remaining work is MAC sys_init/DMAC init, and that it
   prior partial runs — CPU may not be getting a clean reset); `disable_fw_watchdog` was omitted from
   disable_cpu; ROM boot may need a longer settle or a step not obvious from static reading. Needs a
   clean-chip baseline + deeper CPU-boot investigation before more attempts (2-attempt rule hit here).
+
+### Third run — FRESH chip, confounders ruled out
+Physically replugged (clean disk mode) → modeswitch → immediate init. **Identical result**: DMAC/DLE/HCI all
+up (WDE/PLE_INI=0x3, HCI=0x3), WFC=0xc0 fresh, but **H2C_PATH_RDY still 0**. PLATFORM_ENABLE=0x54f on a fresh
+chip too (WCPU_EN set by the ROM's own boot). So the "dirty chip" theory is WRONG — the wall is real and
+reproducible from a clean state. STOPPING hardware iteration (2-attempt rule firmly hit).
+
+**Honest assessment of the H2C_PATH_RDY wall:** power-on, DMAC, DLE(DLFW), USB/HCI init are all validated on
+silicon — a large, real result. But the CPU→download handshake does not arm. Cracking it likely needs more
+than static source reading: candidates are (a) the mac_pwr_switch scoreboard NOTIFY write, (b) a genuine CPU
+core reset (not just WCPU_EN toggle) — disable_fw_watchdog / a reset bit, (c) a USB capture of the Windows
+driver's fwdl to diff the exact register/packet order. This is the boundary where blind porting stops paying.
