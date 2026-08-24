@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" font-family="'Segoe UI',system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c1424"/>
+      <stop offset="1" stop-color="#0a1a2b"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#223349"/>
+      <stop offset="1" stop-color="#16233a"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="340" rx="16" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="1199" height="339" rx="16" fill="none" stroke="#1e2d43" stroke-width="1"/>
+
+  <!-- adapter illustration -->
+  <g transform="translate(190 172)">
+    <ellipse cx="0" cy="150" rx="150" ry="26" fill="url(#glow)"/>
+
+    <!-- antennas -->
+    <g stroke="#8fb6d6" stroke-width="9" stroke-linecap="round" fill="none">
+      <line x1="-26" y1="-52" x2="-96" y2="-150"/>
+      <line x1="26" y1="-52" x2="96" y2="-150"/>
+    </g>
+    <circle cx="-96" cy="-150" r="7" fill="#cfe4f5"/>
+    <circle cx="96" cy="-150" r="7" fill="#cfe4f5"/>
+
+    <!-- RF rings, left tip -->
+    <g fill="none" stroke="url(#accent)" stroke-width="2.5">
+      <circle cx="-96" cy="-150" r="10">
+        <animate attributeName="r" values="6;46" dur="2.6s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.9;0" dur="2.6s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="-96" cy="-150" r="10">
+        <animate attributeName="r" values="6;46" dur="2.6s" begin="0.87s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="0.87s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="-96" cy="-150" r="10">
+        <animate attributeName="r" values="6;46" dur="2.6s" begin="1.73s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="1.73s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+    <!-- RF rings, right tip -->
+    <g fill="none" stroke="url(#accent)" stroke-width="2.5">
+      <circle cx="96" cy="-150" r="10">
+        <animate attributeName="r" values="6;46" dur="2.6s" begin="0.43s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="0.43s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="96" cy="-150" r="10">
+        <animate attributeName="r" values="6;46" dur="2.6s" begin="1.30s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="1.30s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+
+    <!-- body -->
+    <rect x="-44" y="-58" width="88" height="150" rx="14" fill="url(#body)" stroke="#31465f" stroke-width="1.5"/>
+    <rect x="-30" y="-40" width="60" height="20" rx="5" fill="#0e1a2b"/>
+    <circle cx="0" cy="16" r="17" fill="#0e1a2b" stroke="url(#accent)" stroke-width="2"/>
+    <circle cx="0" cy="16" r="6" fill="#22d3ee">
+      <animate attributeName="opacity" values="0.4;1;0.4" dur="2s" repeatCount="indefinite"/>
+    </circle>
+    <rect x="-26" y="52" width="52" height="10" rx="3" fill="#25384f"/>
+
+    <!-- USB-A plug -->
+    <rect x="-18" y="92" width="36" height="30" rx="3" fill="#c9d6e2"/>
+    <rect x="-12" y="100" width="24" height="9" rx="1" fill="#8b98a5"/>
+  </g>
+
+  <!-- title block -->
+  <g transform="translate(430 0)">
+    <text x="0" y="112" fill="#e6edf3" font-size="46" font-weight="700" letter-spacing="-0.5">rtl8852au-userspace</text>
+    <text x="2" y="150" fill="#8b98a5" font-size="19">No-root, userspace monitor mode for the Realtek RTL8852AU over libusb.</text>
+    <text x="2" y="176" fill="#8b98a5" font-size="19">Firmware download, live 802.11 capture, radiotap with RSSI, channel hopping.</text>
+
+    <g font-family="ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace" font-size="13.5">
+      <g transform="translate(0 210)">
+        <rect x="0" y="0" width="150" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
+        <text x="75" y="20" fill="#7ed4f2" text-anchor="middle">firmware download</text>
+      </g>
+      <g transform="translate(162 210)">
+        <rect x="0" y="0" width="140" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
+        <text x="70" y="20" fill="#7ed4f2" text-anchor="middle">monitor capture</text>
+      </g>
+      <g transform="translate(314 210)">
+        <rect x="0" y="0" width="160" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
+        <text x="80" y="20" fill="#7ed4f2" text-anchor="middle">radiotap + RSSI</text>
+      </g>
+      <g transform="translate(486 210)">
+        <rect x="0" y="0" width="150" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
+        <text x="75" y="20" fill="#7ed4f2" text-anchor="middle">channel hopping</text>
+      </g>
+    </g>
+
+    <text x="2" y="285" fill="#5b6b7d" font-size="14" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">ASUS USB-AX56  ·  RTL8852AU  ·  fw 0.13.36.2  ·  no kernel driver, no root</text>
+  </g>
+</svg>
