@@ -14,6 +14,10 @@
 //     (fc=0x0080, broadcast DA, real diverse BSSIDs). A warm-dirty chip (0x1e0=0x23) fails hwburst -> aborts.
 // args: <blob> <startByte> [hb]   blob = usbmon-capture-derived op stream; hb = do hwburst fwdl first.
 // Needs /tmp/fw_cut2_nic.bin (cut2 nic firmware blob, gitignored) alongside the replay blob.
+//
+// Channel hopping needs no code change: it is just a different blob. Capture a full kernel monitor session on
+// the target channel and parse it with tool/parse-usbmon.ts, then replay its last-cycle tail. Proven for ch1:
+//   sudo ./hwdriver full_ch1.bin 2326916 hb   -> 113/140 beacons on ch1, none on ch6.
 #include <libusb-1.0/libusb.h>
 #include <stdio.h>
 #include <stdlib.h>
