@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/time.h>
 
 static libusb_device_handle *dev;
 static FILE *LOG;
@@ -109,6 +110,20 @@ static int hwburst_fwdl(const char*fwpath){
   return booted?0:-1;
 }
 
+// minimal pcap writer (DLT_IEEE802_11 = 105) so captured frames open in Wireshark/tcpdump
+static void pcw(FILE*f,uint32_t v){ uint8_t b[4]={v&0xff,(v>>8)&0xff,(v>>16)&0xff,(v>>24)&0xff}; fwrite(b,1,4,f); }
+static FILE* pcap_open(const char*path){
+  FILE*f=fopen(path,"wb"); if(!f)return NULL;
+  pcw(f,0xa1b2c3d4); uint8_t v[4]={2,0,4,0}; fwrite(v,1,4,f); // magic + ver 2.4
+  pcw(f,0); pcw(f,0); pcw(f,65535); pcw(f,105);              // thiszone, sigfigs, snaplen, DLT=802.11
+  return f;
+}
+static void pcap_frame(FILE*f,const uint8_t*data,int len){
+  if(!f)return; struct timeval tv; gettimeofday(&tv,NULL);
+  pcw(f,(uint32_t)tv.tv_sec); pcw(f,(uint32_t)tv.tv_usec); pcw(f,len); pcw(f,len);
+  fwrite(data,1,len,f);
+}
+
 int main(int argc,char**argv){
   const char*blobpath = argc>1?argv[1]:"/tmp/replay3.bin";
   long startByte = argc>2?atol(argv[2]):0;
@@ -193,6 +208,7 @@ int main(int argc,char**argv){
   // 0x84: walk AGGREGATED rxd units per transfer (rxd_short16/long32, frame off=rxdlen+drvsize*8+shift),
   // for WIFI(rt=0) units print 802.11 frame-control + addr3(BSSID). Dump first 6 raw transfers for offline check.
   P("reading RX EP 0x84 (aggregated rxd parse) ...\n");
+  FILE*pc=pcap_open("/tmp/ax56.pcap"); int pcn=0;
   int frames=0, empty=0, wifi=0, beacons=0, tcnt[16]={0}, dumped=0;
   for(int k=0;k<300 && empty<40;k++){ uint8_t rb[16384]; int tr=0;
     int rc=libusb_bulk_transfer(dev,0x84,rb,sizeof rb,&tr,200);
@@ -209,6 +225,7 @@ int main(int argc,char**argv){
       int foff=off+rxdlen+drvsize*8+shift;
       if(rt==0 && pktsize>=24 && foff+24<=tr){
         wifi++;
+        if(foff+pktsize<=tr){ pcap_frame(pc,rb+foff,pktsize); pcn++; } // save full 802.11 frame to pcap
         uint16_t fc=rb[foff]|(rb[foff+1]<<8);
         const uint8_t*a3=rb+foff+16;
         int isbcn=((fc&0xfc)==0x80);
@@ -222,6 +239,7 @@ int main(int argc,char**argv){
       off+=unit;
     }
   }
+  if(pc){ fclose(pc); P("wrote %d frames to /tmp/ax56.pcap\n",pcn); }
   P("bulk-INs=%d  rxd-units by type:",frames);
   for(int t=0;t<16;t++) if(tcnt[t]) P(" t%d=%d",t,tcnt[t]);
   P("\n  wifi-units=%d beacons=%d\n",wifi,beacons);
