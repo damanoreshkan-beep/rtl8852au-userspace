@@ -115,13 +115,22 @@ static void pcw(FILE*f,uint32_t v){ uint8_t b[4]={v&0xff,(v>>8)&0xff,(v>>16)&0xf
 static FILE* pcap_open(const char*path){
   FILE*f=fopen(path,"wb"); if(!f)return NULL;
   pcw(f,0xa1b2c3d4); uint8_t v[4]={2,0,4,0}; fwrite(v,1,4,f); // magic + ver 2.4
-  pcw(f,0); pcw(f,0); pcw(f,65535); pcw(f,105);              // thiszone, sigfigs, snaplen, DLT=802.11
+  pcw(f,0); pcw(f,0); pcw(f,65535); pcw(f,127);              // thiszone, sigfigs, snaplen, DLT=RADIOTAP
   return f;
 }
-static void pcap_frame(FILE*f,const uint8_t*data,int len){
-  if(!f)return; struct timeval tv; gettimeofday(&tv,NULL);
-  pcw(f,(uint32_t)tv.tv_sec); pcw(f,(uint32_t)tv.tv_usec); pcw(f,len); pcw(f,len);
-  fwrite(data,1,len,f);
+// prepend a radiotap header (channel freq + optional dBm signal) so Wireshark shows band/channel/RSSI
+static void pcap_frame(FILE*f,int freq,int sig,int haveSig,const uint8_t*data,int len){
+  if(!f)return;
+  uint8_t rt[13]; int rtlen;
+  rt[0]=0; rt[1]=0;                                          // it_version, it_pad
+  if(haveSig){ rtlen=13; rt[4]=0x28; }                       // present: CHANNEL(bit3) | DBM_ANTSIGNAL(bit5)
+  else       { rtlen=12; rt[4]=0x08; }                       // present: CHANNEL(bit3)
+  rt[2]=rtlen; rt[3]=0; rt[5]=0; rt[6]=0; rt[7]=0;
+  rt[8]=freq&0xff; rt[9]=(freq>>8)&0xff; rt[10]=0xc0; rt[11]=0x00; // freq + flags: 2.4GHz(0x80)|OFDM(0x40)
+  if(haveSig) rt[12]=(uint8_t)(int8_t)sig;                   // dBm antenna signal
+  struct timeval tv; gettimeofday(&tv,NULL);
+  pcw(f,(uint32_t)tv.tv_sec); pcw(f,(uint32_t)tv.tv_usec); pcw(f,rtlen+len); pcw(f,rtlen+len);
+  fwrite(rt,1,rtlen,f); fwrite(data,1,len,f);
 }
 
 int main(int argc,char**argv){
@@ -209,6 +218,7 @@ int main(int argc,char**argv){
   // for WIFI(rt=0) units print 802.11 frame-control + addr3(BSSID). Dump first 6 raw transfers for offline check.
   P("reading RX EP 0x84 (aggregated rxd parse) ...\n");
   FILE*pc=pcap_open("/tmp/ax56.pcap"); int pcn=0;
+  int curSig=0, haveSig=0, dumped2=0; // RSSI (dBm) from the most recent PPDU-status, applied to that PPDU's frames
   int frames=0, empty=0, wifi=0, beacons=0, tcnt[16]={0}, dumped=0;
   for(int k=0;k<300 && empty<40;k++){ uint8_t rb[16384]; int tr=0;
     int rc=libusb_bulk_transfer(dev,0x84,rb,sizeof rb,&tr,200);
@@ -223,9 +233,25 @@ int main(int argc,char**argv){
       if(pktsize==0) break;
       tcnt[rt]++;
       int foff=off+rxdlen+drvsize*8+shift;
+      if(rt==1){ // PPDU-status: phy_sts_hdr sits AFTER the MAC-info block; then per-path RSSI. signal=(max(A,B)>>1)-110
+        int po=foff; // rxinfo (MAC info) = packet payload start
+        if(po+8<=tr){
+          uint32_t iw0=rb[po]|(rb[po+1]<<8)|(rb[po+2]<<16)|((uint32_t)rb[po+3]<<24);
+          uint32_t iw1=rb[po+4]|(rb[po+5]<<8)|(rb[po+6]<<16)|((uint32_t)rb[po+7]<<24);
+          int usr=iw0&0xf, rxcnt=(iw0>>29)&1, plcp=((iw1>>16)&0xff)<<3;
+          int hs=po+8+usr*4+((usr&1)?4:0)+(rxcnt?96:0)+plcp; // MAC_INFO_SIZE 8 + usr*USR_SIZE 4 (+align) + RX_CNT 96 + plcp
+          if(hs+8<=tr){
+            uint32_t hw0=rb[hs]|(rb[hs+1]<<8)|(rb[hs+2]<<16)|((uint32_t)rb[hs+3]<<24);
+            uint32_t hw1=rb[hs+4]|(rb[hs+5]<<8)|(rb[hs+6]<<16)|((uint32_t)rb[hs+7]<<24);
+            int valid=(hw0>>7)&1, rA=hw1&0xff, rB=(hw1>>8)&0xff, raw=rA>rB?rA:rB;
+            if(valid && raw){ curSig=(raw>>1)-110; haveSig=1;
+              if(dumped2<6){ dumped2++; P("  PPDU sig: usr=%d plcp=%d phy@+%d rssiA=%d rssiB=%d -> %d dBm\n",usr,plcp,hs-po,rA,rB,curSig); } }
+          }
+        }
+      }
       if(rt==0 && pktsize>=24 && foff+24<=tr){
         wifi++;
-        if(foff+pktsize<=tr){ pcap_frame(pc,rb+foff,pktsize); pcn++; } // save full 802.11 frame to pcap
+        if(foff+pktsize<=tr){ pcap_frame(pc,2437,curSig,haveSig,rb+foff,pktsize); pcn++; } // frame + radiotap (ch6)
         uint16_t fc=rb[foff]|(rb[foff+1]<<8);
         const uint8_t*a3=rb+foff+16;
         int isbcn=((fc&0xfc)==0x80);
