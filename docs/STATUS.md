@@ -2,13 +2,29 @@
 
 Legend: ✅ proven on hardware this session · 🟡 code written, untested on-air · ⛔ not yet (needs port) · 🚫 declined
 
+*** ✅ 2026-08-25 — RX **and** TX BOTH PROVEN NO-ROOT, ON THE BOX AND ON AN ANDROID PHONE. ***
+The proven path is `tool/hwdriver.c` (C + libusb), run on the box directly or on Android via `termux-usb`
+(the passed usbfs fd is wrapped with `libusb_wrap_sys_device` + `LIBUSB_OPTION_NO_DEVICE_DISCOVERY`). One
+cold bring-up does it:
+- **fwdl** — `hwburst_fwdl` (HB), with a warm-stop CPU reset so it boots a cold *or* warm chip.
+- **RX / monitor** — cold chip + replay the monitor-on-ch6 tail of a captured kernel bring-up
+  (`full_ch6.bin` @ start ≈ 2329470), no live cal. EP `0x84` delivers real 802.11: this session, from the
+  phone, `t0=138 WIFI / t1=138 PPDU / t10=24 CSI`, 94 beacons — including a **controlled** transmitter
+  (box `iwlwifi` + scapy beacon, SSID `AX56RXTEST` / BSSID `02:ca:fe:12:34:56`, ch6) caught **90×**
+  in the radiotap pcap.
+- **TX / injection** — same bring-up + live `RCK/DACK/IQK/TSSI/DPK` cal, then `[txdesc][frame]` on EP `0x05`.
+  From the phone: 900 frames injected, 360 caught by a second receiver.
+
+The capability table and the journey below are kept as the honest record; the old "not achievable" verdict at
+the very bottom is **superseded** by this result.
+
 | Mode / feature            | State | Where it lives | Blocker |
 |---------------------------|-------|----------------|---------|
 | Enumerate USB devices     | ✅ | tool `list`, native UsbManager | — |
 | Identify (VID/PID/desc)   | ✅ | tool `id`, `usbfull.ts` | — |
 | Modeswitch storage→wifi   | ✅ | tool `switch`, `modeswitch.cpp` | — |
 | Register read (rtw_read32)| ✅ | tool `reg` (low + MAC page) | — |
-| Register write            | 🟡 | tool `regw` | not yet exercised on a safe reg |
+| Register write            | ✅ | tool `regw` | exercised on-HW (e.g. 0x88 WCPU_EN clear for wedge-recovery) |
 | Cut detection (fw select) | ✅ | `rtw_read_cut` | R_AX_SYS_CFG1=0x00F0, cut=(v>>12)&0xf; measured 2 (C-cut) on-device |
 | CPU enable/disable (dlfw)  | ✅ | `rtw_cpu.c` + `native/test` | host-verified (CPU_CLK/WCPU_EN/FWDL_EN/boot_reason) |
 | Init chain integration     | 🟡 | `native-bridge.cpp` | written: cut→pwron→cpu→fwdl over libusb; NDK-only, first on-chip run pending |
@@ -16,14 +32,14 @@ Legend: ✅ proven on hardware this session · 🟡 code written, untested on-ai
 | FW header/section parse   | ✅ | `rtw_fwdl.c::fwhdr_parse` | validated byte-exact on real fw (RESEARCH §3b) |
 | FW download encoder       | ✅ | `rtw_fwdl.c` + `native/test` | compiled + byte-verified on real fw: 194 pkts, txdesc/fwcmd/chunking all correct |
 | dmac_pre_init + dle(DLFW)  | ✅ | `rtw_dle.c` + `native/test` | ported; host-verified: used_size==fifo(458752), bound=32, h2c=48, HCI-DMA holds |
-| FW download ON HARDWARE    | ⛔ | ready to re-test on chip | full chain wired (pwron→dmac/dle→hci→cpu→fwdl); needs wifi-mode + clean chip |
-| MAC/BB/RF init + calib     | ⛔ | — | THE big remaining block; huge reg tables + RF cal, needs on-HW iteration |
+| FW download ON HARDWARE    | ✅ | `hwdriver.c::hwburst_fwdl` | STS=7 BOOTED on box + phone; warm-stop boots cold *or* warm chip |
+| MAC/BB/RF init + calib     | ✅ | `hwdriver.c` replay tail + live cal | cracked via one-clean-bring-up replay (`full_ch6.bin`) + live RCK/DACK/IQK/TSSI/DPK |
 | RX descriptor strip        | ✅ | `rtw_rx.c` + `native/test` | host-verified (offset=rxdlen+drv*8+shift, rate/crc) |
-| Monitor(sniffer) enable    | 🟡 | `rtw_rx.c::rtw_monitor_enable` | R_AX_RX_FLTR_OPT 0xCE20 SNIFFER_MODE; written, not HW-verified |
-| Channel hopping 2.4/5 GHz  | 🟡 | `channel-hop.cpp` (skeleton) | channel set = H2C, not raw reg |
-| RX raw 802.11 frames       | 🟡 | `frame-parser.cpp` strips rxd | parser+strip done; no frames until MAC/BB/RF init |
-| Scan (SSID/BSSID/ch/rate)  | 🟡 | parser extracts SSID/BSSID/ch | RSSI needs PPDU-status; no RX feed until init |
-| Frame injection (generic) | 🟡 | `injectRaw()` bulk-OUT primitive | txdesc + fw ready |
+| Monitor(sniffer) enable    | ✅ | `hwdriver.c` (RX_FLTR 0xCE20) | HW-verified on box + phone; final filter 0x03174438 |
+| Channel hopping 2.4/5 GHz  | ✅ | per-channel bring-up blob | all 39 channels (14×2.4 + 25×5 GHz) captured + replayed; warm re-init, no replug |
+| RX raw 802.11 frames       | ✅ | `hwdriver.c` EP 0x84 parse | real beacons + data + PPDU-RSSI, radiotap pcap (box + phone) |
+| Scan (SSID/BSSID/ch/rate)  | 🟡 | EP 0x84 parser | RX feed live now; SSID/BSSID/RSSI parsed; a scan UI on top is TODO |
+| Frame injection (generic) | ✅ | `hwdriver.c` EP 0x05 | on-air, verified by a 2nd receiver (box + phone) |
 | Deauth attack             | 🚫 | — | declined: DoS, no authz context |
 
 ## The critical path to a working scanner
@@ -81,3 +97,8 @@ in the vendor source path we can see, or needs the exact on-the-wire order (a US
 or hardware/secure-boot state we can't reach no-root. **No-root userspace monitor mode is not achievable via
 this route in reasonable effort** — the kernel driver + root remains the only proven monitor path for 8852AU.
 This repo stands as a validated bring-up up to the fwdl wall, honestly documented.
+
+*** SUPERSEDED (2026-08-25). The verdict above was wrong. The fwdl handshake and the full MAC/BB/RF bring-up
+were cracked (record-and-replay a single clean monitor bring-up against one hwburst fw boot, + live RF cal for
+TX). See the ✅ banner at the top: RX and TX both work no-root — on the box **and** on an Android phone over
+termux-usb. No-root userspace monitor mode IS achievable via this route. ***

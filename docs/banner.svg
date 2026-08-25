@@ -69,7 +69,7 @@
     <!-- headline -->
     <text x="60" y="70" fill="#eef4ff" font-size="46" font-weight="800" letter-spacing="0.5">RTL8852AU</text>
     <text x="62" y="102" fill="url(#accent)" font-size="19" font-weight="600" letter-spacing="2.5">NO-ROOT USERSPACE Wi-Fi DRIVER</text>
-    <text x="62" y="128" fill="#7d8aa5" font-size="13.5" letter-spacing="0.3">ASUS USB-AX56 · driven entirely over libusb / usbfs — no kernel module, no root</text>
+    <text x="62" y="128" fill="#7d8aa5" font-size="13.5" letter-spacing="0.3">ASUS USB-AX56 · libusb / usbfs — no kernel module, no root · monitor RX + on-air TX, even from an Android phone</text>
 
     <!-- capability chips -->
     <g font-size="12.5" font-weight="600">
@@ -87,7 +87,7 @@
       </g>
       <g transform="translate(462,192)">
         <rect width="118" height="26" rx="13" fill="#122a1d" stroke="#34d399"/>
-        <circle cx="16" cy="13" r="4" fill="#facc15"><animate attributeName="fill-opacity" values="1;0.3;1" dur="1.6s" repeatCount="indefinite"/></circle>
+        <circle cx="16" cy="13" r="4" fill="#34d399"/>
         <text x="30" y="17" fill="#c7f0d3" font-weight="700">TX inject</text>
       </g>
     </g>

@@ -99,6 +99,11 @@ sudo ./hwdriver full_ch6.bin <tail-offset> hb          # -> beacons to /tmp/ax56
 tool/ax56ctl.sh list
 tool/ax56ctl.sh switch <dev>
 tool/ax56ctl.sh reg    <dev> 0x1e0
+
+# full RX/TX chain on Android, no root: cross-compile hwdriver.c to aarch64, then run under termux-usb.
+# The usbfs fd arrives as $1 (-> TXFD, wrapped into libusb); all params come through the environment.
+BLOB=full_ch6.bin START=<tail-offset> HB=1 FW=fw_cut2_nic.bin \
+  termux-usb -r -e tool/axtxc.sh <dev>          # monitor RX -> beacons to /tmp/ax56.pcap
 ```
 
 Channel hopping is just a different bring-up blob — capture a kernel monitor session on the target channel,
@@ -135,6 +140,7 @@ See [`docs/`](docs/) for the register-level research notes.
 | Channel hopping (39 channels) | Proven — per-channel bring-up |
 | Live TX calibration (RCK/DACK/IQK/TSSI/DPK) | Proven — DPK converges from user space |
 | **Transmit / injection** | **Proven on the air — 899/900 frames caught by a 2nd receiver** |
+| **No-root on Android (termux-usb)** | **Proven — RX + TX from a phone; usbfs fd wrapped into libusb** |
 
 ---
 

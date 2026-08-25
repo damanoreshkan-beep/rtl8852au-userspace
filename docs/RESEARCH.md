@@ -109,12 +109,15 @@ So: pick the inner blob by **cv (cut) + type=nic** for monitor. Cut comes from t
   drvsize=(d0>>28)&7. **802.11 frame at `rxdlen + drvsize*8 + shift`**; crc_err=dword3&BIT9; rate=(dword2>>16)&0x1ff.
   Ported to `rtw_rx.c::rtw_rxd_parse`, host-tested (`native/test/test_rxd.c`). frame-parser strips it first.
 - **Monitor enable — register found** (mac_reg.h): `R_AX_RX_FLTR_OPT` = **0xCE20**, `B_AX_SNIFFER_MODE` = BIT(0)
-  (+ A_A1_MATCH/A_BC/A_MC accept bits). `rtw_rx.c::rtw_monitor_enable` sets them. WRITTEN, not HW-verified.
-- **Still open: RSSI** lives in a PPDU-status rpkt (separate type), not the wifi rxd — TODO when RX runs.
-- **THE big remaining block: MAC/BB/RF init + RF calibration** — thousands of register-table entries plus
-  calibration routines. This is most of the driver and realistically needs on-hardware iteration; it is NOT
-  something to port blind. Without it the MAC delivers no frames, so monitor/scan cannot be exercised yet.
-  Channel set is an H2C command (not a raw reg write) and belongs to this block.
+  (+ A_A1_MATCH/A_BC/A_MC accept bits). Set in `hwdriver.c`. **HW-verified on box + phone** (final RX_FLTR
+  0x03174438).
+- **RSSI — RESOLVED.** Parsed from the PPDU-status rpkt (rpkt_type 1), separate from the wifi rxd:
+  `signal = (max(rssiA,rssiB) >> 1) - 110`; tshark shows -59..-80 dBm, written into the radiotap pcap.
+- **THE big block (MAC/BB/RF init + RF calibration) — RESOLVED (2026-08-25).** It was NOT ported blind:
+  record one clean kernel monitor bring-up with usbmon and replay its post-fwdl tail against a single hwburst
+  fw boot (self-contained BB/RF init + RFK + channel + RX filter); for TX, add the live RCK/DACK/IQK/TSSI/DPK
+  cal on top. Result: real frames on RX and on-air TX, both no-root — on the box **and** on an Android phone
+  over termux-usb. Channel set is an H2C command carried inside the replayed tail (a per-channel blob).
 
 ## 5. Power-on before fwdl — RESOLVED + host-verified
 
