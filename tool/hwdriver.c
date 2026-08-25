@@ -379,58 +379,10 @@ static void rx_probe(const char*label){
   P("\n");
 }
 
-int main(int argc,char**argv){
-  // Env overrides argv so the same binary runs on the box (argv) and on Android via termux-usb (env + TXFD).
-  const char*blobpath = getenv("BLOB") ? getenv("BLOB") : (argc>1?argv[1]:"/tmp/replay3.bin");
-  long startByte = getenv("START") ? atol(getenv("START")) : (argc>2?atol(argv[2]):0);
-  int hbMode = getenv("HB") ? 1 : (argc>3 && argv[3][0]=='h');
-   if(getenv("TXFD")) g_txfd = atoi(getenv("TXFD"));
-  if(getenv("FW")) g_fwpath = getenv("FW");
-  LOG=fopen(getenv("LOG") ? getenv("LOG") : "/tmp/hwdriver.log","w");
-  if(!LOG) LOG=stderr;
-  // Android/no-root: libusb_init would try to enumerate USB via sysfs/udev and fail. Tell it not to discover
-  // devices — we hand it the fd from termux-usb directly. (No effect on the box path, which has no TXFD.)
-  if(g_txfd >= 0) libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
-  if(libusb_init(NULL)<0){P("libusb init fail\n");return 1;}
-  if(reopen()<0){P("open fail (txfd=%d)\n", g_txfd);return 1;}
-  if(getenv("RESET")){ uint32_t before=r32(0x1e0); int rc=libusb_reset_device(dev); P("RESET: entry 0x1e0=0x%x, libusb_reset_device rc=%d (%s)\n", before, rc, libusb_error_name(rc)); return 0; }
-  if(getenv("PWRON")){ uint32_t b=r32(0x1e0); int rc=pwr_seq_run(0x04,0x02); P("PWRON: rc=%d, 0x1e0 0x%x->0x%x 0x88=0x%x 0xF0=0x%x\n", rc, b, r32(0x1e0), r32(0x88), r32(0xf0)); if(getenv("PWRON_ONLY")) return 0; }
-  P("entry 0x1e0=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xf0));
-
-  // DUMP_ONLY: read a broad register swath onto whatever state the chip is in (e.g. after a kernel bring-up
-  // + modprobe -r), write to the named file. Diff against a userspace-bring-up dump to find TX-enable regs.
-  if(getenv("DUMP_ONLY")){ dump_regs(getenv("DUMP_ONLY")); P("DUMP_ONLY -> %s (entry 0x1e0=0x%x)\n", getenv("DUMP_ONLY"), r32(0x1e0)); return 0; }
-
-  // INJECT_ONLY: no bring-up at all — just bulk-OUT the TX packets on EP5 onto whatever state the chip is in.
-  // Used to isolate: if the kernel left the chip TX-enabled and this radiates, our BRING-UP is the gap; if it
-  // still does not, our SUBMISSION differs from the kernel's.
-  if(getenv("INJECT_ONLY")){ char*injf=getenv("INJECT");
-    if(injf){ FILE*jf=fopen(injf,"rb"); if(jf){ fseek(jf,0,SEEK_END); long js=ftell(jf); fseek(jf,0,SEEK_SET); uint8_t*jb=malloc(js); fread(jb,1,js,jf); fclose(jf);
-      int reps=getenv("INJECT_REPS")?atoi(getenv("INJECT_REPS")):1; int okc=0,errc=0;
-      P("INJECT_ONLY: EP5, %ld bytes, %d reps, entry 0x1e0=0x%x\n", js, reps, r32(0x1e0));
-      for(int rep=0;rep<reps;rep++){ long q=0; while(q+2<=js){ int ln=jb[q]|(jb[q+1]<<8); q+=2; if(q+ln>js)break; int tr=0; int rc=libusb_bulk_transfer(dev,0x05,jb+q,ln,&tr,1000); if(rc==0)okc++; else{errc++; if(errc<=3)P("  rc=%d %s\n",rc,libusb_error_name(rc));} q+=ln; } usleep(4000); }
-      P("INJECT_ONLY done: ok=%d err=%d 0x1e0=0x%x 0xF0=0x%x\n", okc, errc, r32(0x1e0), r32(0xf0));
-    } }
-    return 0;
-  }
-
-  // DPKMEASURE: run ONLY the DPK (setup+sync+agc) onto whatever analog state the chip is already in (e.g.
-  // after a kernel bring-up + modprobe -r), NO userspace bring-up. Decides: does our DPK-sync measurement
-  // give kernel-level corr (~234) on a kernel-established analog foundation? If yes -> our replay bring-up is
-  // the culprit (live-init port will fix); if it stays ~141 -> our measurement/USB is the culprit.
-  if(getenv("DPKMEASURE")){
-    P("DPKMEASURE: DPK sync/agc on current chip state (NO bring-up), entry 0x1e0=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xf0));
-    dpk_live_run();
-    return 0;
-  }
-
-  FILE*f=fopen(blobpath,"rb"); if(!f){P("no blob\n");return 1;}
-  fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
-  uint8_t*blob=malloc(sz); fread(blob,1,sz,f); fclose(f);
-  if(hbMode){ P("running hwburst init+fwdl (cycle 1)...\n");
-    int rc=hwburst_fwdl(g_fwpath);
-    if(rc!=0){ P("*** FWDL DID NOT BOOT (STS!=7, 0x1e0=0x%x) -- chip dirty; COLD REPLUG needed. Aborting.\n",r32(0x1e0)); return 2; }
-  }
+// The captured-config replay loop, shared by main()'s box/termux path and the RF_LIB JNI bring-up: walk the
+// blob from startByte applying control writes(1)/reads(3)/polls(4)/bulks(2), with the 0x2f0 re-fwdl hwburst
+// substitution, the 0x1bff8 IQK/DPK done-poll, and the ep7 fwdl section burst. Aborts on wedge / 30 consec fails.
+static int replay_ops(uint8_t*blob, long sz, long startByte){
   long p=startByte;
   #define G8() (blob[p++])
   #define G16() (p+=2, (blob[p-2]|(blob[p-1]<<8)))
@@ -493,6 +445,66 @@ int main(int argc,char**argv){
     if(ri%2000==0) P("  ..%ld (w=%ld r=%ld p=%ld b=%ld burst=%ld ptmo=%ld fail=%ld) 0x1e0=0x%x ce20=0x%x\n",ri,nw,nr,np,nb,bursts,ptmo,fail,r32(0x1e0),r32(0xce20));
   }
   P("REPLAY done: %ld ops (w=%ld r=%ld p=%ld b=%ld burst=%ld ptmo=%ld fail=%ld)\n",ri,nw,nr,np,nb,bursts,ptmo,fail);
+  #undef G8
+  #undef G16
+  #undef G32
+  return (fail || ptmo>50) ? -1 : 0;
+}
+
+#ifndef RF_LIB
+int main(int argc,char**argv){
+  // Env overrides argv so the same binary runs on the box (argv) and on Android via termux-usb (env + TXFD).
+  const char*blobpath = getenv("BLOB") ? getenv("BLOB") : (argc>1?argv[1]:"/tmp/replay3.bin");
+  long startByte = getenv("START") ? atol(getenv("START")) : (argc>2?atol(argv[2]):0);
+  int hbMode = getenv("HB") ? 1 : (argc>3 && argv[3][0]=='h');
+   if(getenv("TXFD")) g_txfd = atoi(getenv("TXFD"));
+  if(getenv("FW")) g_fwpath = getenv("FW");
+  LOG=fopen(getenv("LOG") ? getenv("LOG") : "/tmp/hwdriver.log","w");
+  if(!LOG) LOG=stderr;
+  // Android/no-root: libusb_init would try to enumerate USB via sysfs/udev and fail. Tell it not to discover
+  // devices — we hand it the fd from termux-usb directly. (No effect on the box path, which has no TXFD.)
+  if(g_txfd >= 0) libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+  if(libusb_init(NULL)<0){P("libusb init fail\n");return 1;}
+  if(reopen()<0){P("open fail (txfd=%d)\n", g_txfd);return 1;}
+  if(getenv("RESET")){ uint32_t before=r32(0x1e0); int rc=libusb_reset_device(dev); P("RESET: entry 0x1e0=0x%x, libusb_reset_device rc=%d (%s)\n", before, rc, libusb_error_name(rc)); return 0; }
+  if(getenv("PWRON")){ uint32_t b=r32(0x1e0); int rc=pwr_seq_run(0x04,0x02); P("PWRON: rc=%d, 0x1e0 0x%x->0x%x 0x88=0x%x 0xF0=0x%x\n", rc, b, r32(0x1e0), r32(0x88), r32(0xf0)); if(getenv("PWRON_ONLY")) return 0; }
+  P("entry 0x1e0=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xf0));
+
+  // DUMP_ONLY: read a broad register swath onto whatever state the chip is in (e.g. after a kernel bring-up
+  // + modprobe -r), write to the named file. Diff against a userspace-bring-up dump to find TX-enable regs.
+  if(getenv("DUMP_ONLY")){ dump_regs(getenv("DUMP_ONLY")); P("DUMP_ONLY -> %s (entry 0x1e0=0x%x)\n", getenv("DUMP_ONLY"), r32(0x1e0)); return 0; }
+
+  // INJECT_ONLY: no bring-up at all — just bulk-OUT the TX packets on EP5 onto whatever state the chip is in.
+  // Used to isolate: if the kernel left the chip TX-enabled and this radiates, our BRING-UP is the gap; if it
+  // still does not, our SUBMISSION differs from the kernel's.
+  if(getenv("INJECT_ONLY")){ char*injf=getenv("INJECT");
+    if(injf){ FILE*jf=fopen(injf,"rb"); if(jf){ fseek(jf,0,SEEK_END); long js=ftell(jf); fseek(jf,0,SEEK_SET); uint8_t*jb=malloc(js); fread(jb,1,js,jf); fclose(jf);
+      int reps=getenv("INJECT_REPS")?atoi(getenv("INJECT_REPS")):1; int okc=0,errc=0;
+      P("INJECT_ONLY: EP5, %ld bytes, %d reps, entry 0x1e0=0x%x\n", js, reps, r32(0x1e0));
+      for(int rep=0;rep<reps;rep++){ long q=0; while(q+2<=js){ int ln=jb[q]|(jb[q+1]<<8); q+=2; if(q+ln>js)break; int tr=0; int rc=libusb_bulk_transfer(dev,0x05,jb+q,ln,&tr,1000); if(rc==0)okc++; else{errc++; if(errc<=3)P("  rc=%d %s\n",rc,libusb_error_name(rc));} q+=ln; } usleep(4000); }
+      P("INJECT_ONLY done: ok=%d err=%d 0x1e0=0x%x 0xF0=0x%x\n", okc, errc, r32(0x1e0), r32(0xf0));
+    } }
+    return 0;
+  }
+
+  // DPKMEASURE: run ONLY the DPK (setup+sync+agc) onto whatever analog state the chip is already in (e.g.
+  // after a kernel bring-up + modprobe -r), NO userspace bring-up. Decides: does our DPK-sync measurement
+  // give kernel-level corr (~234) on a kernel-established analog foundation? If yes -> our replay bring-up is
+  // the culprit (live-init port will fix); if it stays ~141 -> our measurement/USB is the culprit.
+  if(getenv("DPKMEASURE")){
+    P("DPKMEASURE: DPK sync/agc on current chip state (NO bring-up), entry 0x1e0=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xf0));
+    dpk_live_run();
+    return 0;
+  }
+
+  FILE*f=fopen(blobpath,"rb"); if(!f){P("no blob\n");return 1;}
+  fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
+  uint8_t*blob=malloc(sz); fread(blob,1,sz,f); fclose(f);
+  if(hbMode){ P("running hwburst init+fwdl (cycle 1)...\n");
+    int rc=hwburst_fwdl(g_fwpath);
+    if(rc!=0){ P("*** FWDL DID NOT BOOT (STS!=7, 0x1e0=0x%x) -- chip dirty; COLD REPLUG needed. Aborting.\n",r32(0x1e0)); return 2; }
+  }
+  replay_ops(blob, sz, startByte);
   // WRFTEST: verify the RF-LSSI write path + masked-RMW helpers on real silicon after bring-up.
   if(getenv("WRFTEST")){
     P("WRFTEST: RF read-back after bring-up (chip 0xF0=0x%x)\n", r32(0xf0));
@@ -642,3 +654,4 @@ int main(int argc,char**argv){
   else            P(">>> no RX on 0x84 <<<\n");
   return 0;
 }
+#endif // RF_LIB
