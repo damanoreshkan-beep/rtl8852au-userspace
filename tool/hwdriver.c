@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 static libusb_device_handle *dev;
 static FILE *LOG;
@@ -42,6 +43,12 @@ static uint32_t r32(uint32_t addr){
   libusb_control_transfer(dev,0xC0,0x05,addr&0xffff,(addr>>16)&0xff,b,4,300);
   return b[0]|(b[1]<<8)|(b[2]<<16)|((uint32_t)b[3]<<24);
 }
+static void dump_regs(const char*path){
+  FILE*d=fopen(path,"w"); if(!d)return;
+  uint32_t ranges[][2]={{0x0000,0x0400},{0x1000,0x1200},{0x8000,0x9400},{0xA000,0xA200},{0xC000,0xE400},{0x10000,0x1e000}};
+  for(int r=0;r<6;r++) for(uint32_t a=ranges[r][0];a<ranges[r][1];a+=4){ uint32_t v=r32(a); fprintf(d,"0x%05x=0x%08x\n",a,v); }
+  fclose(d);
+}
 static int g_pending=0;
 static void LIBUSB_CALL burst_cb(struct libusb_transfer*x){ (void)x; g_pending--; }
 // burst-submit n bulk-OUT buffers on EP7 asynchronously (like the kernel), wait for all completions.
@@ -59,6 +66,20 @@ static int burst_ep7(uint8_t**bufs,int*lens,int n){
 }
 
 static void w32(uint32_t a,uint32_t v){ uint8_t b[4]={v&0xff,(v>>8)&0xff,(v>>16)&0xff,(v>>24)&0xff}; libusb_control_transfer(dev,0x40,0x05,a&0xffff,(a>>16)&0xff,b,4,300); }
+// --- IQK infrastructure (increment 3): masked RMW + RF-LSSI direct path ---
+// The BB/PHY register page is at USB +0x10000 (kernel BB 0x8000 == USB 0x18000). MAC regs stay direct.
+#define BB(a) (0x10000u + (a))                       // kernel BB addr -> USB addr
+static uint32_t maskshift(uint32_t m){ uint32_t s=0; if(!m)return 0; while(!((m>>s)&1))s++; return s; }
+static void w32m(uint32_t a,uint32_t mask,uint32_t val){ uint32_t o=r32(a); uint32_t s=maskshift(mask); w32(a,(o&~mask)|((val<<s)&mask)); }
+static void bbset(uint32_t bba,uint32_t bits){ uint32_t a=BB(bba); w32(a,r32(a)|bits); }
+static void bbclr(uint32_t bba,uint32_t bits){ uint32_t a=BB(bba); w32(a,r32(a)&~bits); }
+static void bbm(uint32_t bba,uint32_t mask,uint32_t val){ w32m(BB(bba),mask,val); }   // BB masked write (kernel addr)
+static uint32_t bbr(uint32_t bba,uint32_t mask){ uint32_t v=r32(BB(bba)); return (v&mask)>>maskshift(mask); }
+// RF direct access (8852A base path): BB addr = rf_base[path] + (rf_addr<<2), 20-bit reg. rf_base A=0xc000 B=0xd000.
+static const uint32_t RF_BASE[2]={0xc000u,0xd000u};
+#define RFREG_MASK 0xfffffu
+static void wrf(int path,uint32_t rfa,uint32_t mask,uint32_t val){ uint32_t a=BB(RF_BASE[path]+((rfa&0xff)<<2)); w32m(a,mask&RFREG_MASK,val); usleep(1); }
+static uint32_t rrf(int path,uint32_t rfa,uint32_t mask){ uint32_t v=r32(BB(RF_BASE[path]+((rfa&0xff)<<2)))&RFREG_MASK; return (v&mask)>>maskshift(mask); }
 // scan blob forward from 'from' to the first non-section op after the next fwdl section run
 static long skip_to_after_fwdl(uint8_t*blob,long from,long sz){
   long p=from; int sawHdr=0,inSec=0;
@@ -137,6 +158,165 @@ static void pcap_frame(FILE*f,int freq,int sig,int haveSig,const uint8_t*data,in
   fwrite(rt,1,rtlen,f); fwrite(data,1,len,f);
 }
 
+// ===================== IQK chain (increment 4: live IQK up to LOK) =====================
+// Ported verbatim from rtw8852a_rfk.c (2.4G, 20M, ch6). BB via bbm/bbset/bbclr (kernel addr, +0x10000 in USB);
+// RF via wrf/rrf. Order = _doiqk per path: get_ch_info -> macbb_setting -> preset -> txclk -> 3x[res_table +
+// txk_setting + lok(2x one_shot)]. Stops after LOK (txk_group_sel/rxk = next increment).
+static int g_band=0, g_bw=0, g_syn=0;   // 2G, 20M, syn1to2
+
+static void iqk_get_ch_info(int path){
+  g_band=0; g_bw=0;
+  uint32_t reg35c = bbr(0x35c, 0x00000c00);
+  g_syn = (reg35c==0x01)?1:0;
+  bbm(0x9fe4, (0x000fu<<(path*16)), g_band);
+  bbm(0x9fe4, (0x00f0u<<(path*16)), g_bw);
+  bbm(0x9fe4, (0xff00u<<(path*16)), 6);
+  P("  [get_ch_info p%d] band=%d bw=%d syn1to2=%d (0x35c[11:10]=%u)\n", path, g_band, g_bw, g_syn, reg35c);
+}
+static const uint32_t IQK_MACBB[][3]={
+  {0x20fc,0xffff0000,0x00000303},{0x5864,0x18000000,0x00000003},{0x7864,0x18000000,0x00000003},
+  {0x12b8,0x40000000,0x00000001},{0x32b8,0x40000000,0x00000001},{0x030c,0xff000000,0x00000013},
+  {0x032c,0xffff0000,0x00000001},{0x12b8,0x10000000,0x00000001},{0x58c8,0x01000000,0x00000001},
+  {0x78c8,0x01000000,0x00000001},{0x5864,0xc0000000,0x00000003},{0x7864,0xc0000000,0x00000003},
+  {0x2008,0x01ffffff,0x01ffffff},{0x0c1c,0x00000004,0x00000001},{0x0700,0x08000000,0x00000001},
+  {0x0c70,0x000003ff,0x000003ff},{0x0c60,0x00000003,0x00000003},{0x0c6c,0x00000001,0x00000001},
+  {0x58ac,0x08000000,0x00000001},{0x78ac,0x08000000,0x00000001},{0x0c3c,0x00000200,0x00000001},
+  {0x2344,0x80000000,0x00000001},{0x4490,0x80000000,0x00000001},{0x12a0,0x00007000,0x00000007},
+  {0x12a0,0x00008000,0x00000001},{0x12a0,0x00070000,0x00000003},{0x12a0,0x00080000,0x00000001},
+  {0x32a0,0x00070000,0x00000003},{0x32a0,0x00080000,0x00000001},{0x0700,0x01000000,0x00000001},
+  {0x0700,0x06000000,0x00000002},{0x20fc,0xffff0000,0x00003333},{0x58f0,0x00080000,0x00000000},
+  {0x78f0,0x00080000,0x00000000},
+};
+static void iqk_macbb_setting(void){ for(unsigned i=0;i<sizeof(IQK_MACBB)/sizeof(IQK_MACBB[0]);i++) bbm(IQK_MACBB[i][0],IQK_MACBB[i][1],IQK_MACBB[i][2]); }
+static void iqk_preset(int path){
+  bbm(0x8104+(path<<8),0x1,0); bbm(0x8154+(path<<8),0x4,0); wrf(path,0x05,0x1,0x0);
+  bbm(0x8008,0xffffffffu,0x00000080); bbm(0x8080,0xffffffffu,0x0); bbm(0x8088,0xffffffffu,0x81ff010a);
+  bbm(0x80d0,0xffffffffu,0x00200000); bbm(0x8074,0xffffffffu,0x80000000); bbm(0x81dc+(path<<8),0xffffffffu,0x0);
+}
+static void iqk_txclk_setting(int path){ bbm(0x8120+(path<<8),0xffffffffu,0xce000a08); }
+static void lok_res_table(int path,int ibias){
+  wrf(path,0xef,RFREG_MASK,0x2); wrf(path,0x33,RFREG_MASK,(g_band==0)?0x0:0x1);
+  wrf(path,0x3f,RFREG_MASK,ibias); wrf(path,0xef,RFREG_MASK,0x0);
+}
+static void iqk_txk_setting(int path){
+  bbset(0x12b8+(path<<13),(1u<<30));
+  bbm(0x030c,0xff000000,0x1f); usleep(1); bbm(0x030c,0xff000000,0x13);
+  bbm(0x032c,0xffff0000,0x0001); usleep(1); bbm(0x032c,0xffff0000,0x0041); usleep(1);
+  bbm(0x20fc,0xffff0000,0x0303); bbm(0x20fc,0xffff0000,0x0000);
+  wrf(path,0x90,0x3,0x00); wrf(path,0xde,(0x7fu<<13),0x3f); wrf(path,0x51,(1u<<19),0x0);
+  wrf(path,0x51,(1u<<11),0x1); wrf(path,0x52,(1u<<11),0x1); wrf(path,0x55,0x1,0x0);
+  wrf(path,0xef,0x4,0x1); wrf(path,0xdf,0x4,0x0); wrf(path,0x33,0x3ff,0x000);
+  wrf(path,0x09,RFREG_MASK,0x80200); wrf(path,0x08,RFREG_MASK,0x80200);
+  wrf(path,0x00,RFREG_MASK,0x403e0|g_syn); usleep(1);
+}
+static void iqk_one_shot(int path,int fine){
+  uint32_t rfc=(path==0)?0x5864:0x7864;
+  bbset(rfc,0x20000000); bbm(0x802c,0xfff,0x009);
+  uint32_t cmd=(fine?0x208:0x108)|(1u<<(4+path));
+  bbm(0x8000,0xffffffffu,cmd+1); bbset(0x80b0,(1u<<28)); usleep(1);
+  int done=0,i; for(i=0;i<120;i++){ if((r32(BB(0xbff8))&0xff)==0x55){done=1;break;} usleep(1); }
+  bbclr(0x8010,0xff); uint32_t rpt=r32(BB(0x8008)); bbclr(rfc,0x20000000);
+  P("    [one_shot p%d %s] done=%d(i=%d) rpt=0x%x\n", path, fine?"FINE":"COARSE", done, i, rpt);
+}
+static int iqk_lok(int path){
+  uint32_t itqt=(g_band==0)?0x09:0x12;
+  wrf(path,0x56,0xffff,(g_band==0)?0xe5e0:0xe4e0);
+  bbset(0x8034,0x30); uint32_t rf0=rrf(path,0x00,RFREG_MASK); bbm(0x8020,0xfffff,rf0|g_syn);
+  bbclr(0x8124+(path<<8),0xf00); bbm(0x8154+(path<<8),0x100,0x1); bbm(0x8154+(path<<8),0x8,0x1);
+  bbm(0x8154+(path<<8),0x3,0x0); bbset(0x0c60,0x2); bbclr(0x8010,0xff);
+  bbm(0x81cc+(path<<8),0xffffffffu,itqt); iqk_one_shot(path,0); usleep(10000);
+  bbm(0x81cc+(path<<8),0xffffffffu,itqt); iqk_one_shot(path,1);
+  uint32_t tmp=rrf(path,0x58,RFREG_MASK); uint32_t ci=(tmp>>15)&0x1f, cq=(tmp>>10)&0x1f;
+  int fail=(ci<2||ci>0x1d||cq<2||cq>0x1d);
+  P("    [lok p%d] TXMO=0x%x i=0x%x q=0x%x fail=%d\n", path, tmp, ci, cq, fail);
+  return fail;
+}
+// TXK IQ-imbalance cal: ID_TXK one-shot (clears the rfc bit, TXT=0x025, cmd 0x808|(1<<(path+4)) for 2G-20M).
+static uint32_t g_nb_txcfir[2]={0x40000000,0x40000000}, g_nb_rxcfir[2]={0x40000000,0x40000000};
+static int txk_one_shot(int path){
+  uint32_t rfc=(path==0)?0x5864:0x7864;
+  bbclr(rfc,0x20000000); bbm(0x802c,0xfff,0x025);          // ID_TXK: clr rfc bit, B_IQK_DIF4_TXT=0x025
+  uint32_t cmd=0x808|(1u<<(4+path));                       // 0x008 | (1<<(path+4)) | ((0x8+iqk_bw=0)<<8)
+  bbm(0x8000,0xffffffffu,cmd+1); bbset(0x80b0,(1u<<28)); usleep(1);
+  int done=0,i; for(i=0;i<400;i++){ if((r32(BB(0xbff8))&0xff)==0x55){done=1;break;} usleep(1); }
+  bbclr(rfc,0x20000000);
+  return done;
+}
+static void txk_group_sel(int path){
+  static const uint32_t g_txgain[4]={0x60e8,0x60f0,0x61e8,0x61ed};
+  static const uint32_t g_itqt[4]={0x09,0x12,0x12,0x12};
+  static const uint32_t g_attsmxr[4]={0x0,0x1,0x1,0x1};
+  for(int gp=0;gp<4;gp++){
+    bbm(0x8148+(path<<8),0x1f,0x08);                       // R_RFGAIN_BND B_RFGAIN_BND=0x08 (2G)
+    wrf(path,0x56,0xffff,g_txgain[gp]);                    // RR_GAINTX all
+    wrf(path,0x51,(1u<<11),g_attsmxr[gp]);                 // RR_TXG1 ATT1
+    wrf(path,0x52,(1u<<11),g_attsmxr[gp]);                 // RR_TXG2 ATT0
+    bbm(0x81cc+(path<<8),0xffffffffu,g_itqt[gp]);          // R_KIP_IQP
+    bbclr(0x8124+(path<<8),(0xfu<<8));                     // R_IQK_RES B_IQK_RES_TXCFIR
+    bbset(0x8154+(path<<8),(1u<<8));                       // R_CFIR_LUT SEL
+    bbset(0x8154+(path<<8),(1u<<3));                       // R_CFIR_LUT G3
+    bbm(0x8154+(path<<8),0x3,gp);                          // R_CFIR_LUT GP=gp
+    bbclr(0x8010,0xff);                                    // R_NCTL_N1 CIP
+    int done=txk_one_shot(path);
+    P("    [txk p%d gp%d] done=%d 0xF0=0x%x\n", path, gp, done, r32(0xf0));
+  }
+  bbm(0x8124+(path<<8),(0xfu<<8),0x5);                     // R_IQK_RES.TXCFIR=0x5 (wideband)
+  g_nb_txcfir[path]=0x40000000;
+}
+// restore BB/RF out of cal mode into operating mode — WITHOUT this TX will not run.
+static void iqk_restore(int path){
+  bbm(0x8138+(path<<8),0xffffffffu,g_nb_txcfir[path]);     // R_TXIQC
+  bbm(0x813c+(path<<8),0xffffffffu,g_nb_rxcfir[path]);     // R_RXIQC
+  bbclr(0x8008,0xffffffffu);                               // R_NCTL_RPT
+  bbclr(0x8074,0xffffffffu);                               // R_MDPK_RX_DCK
+  bbm(0x8088,0xffffffffu,0x80000000);                      // R_KIP_SYSCFG
+  bbclr(0x80d0,0xffffffffu);                               // R_KPATH_CFG
+  bbclr(0x80e0,0x1);                                       // R_GAPK B_GAPK_ADR
+  bbm(0x8120+(path<<8),0xffffffffu,0x10010000);            // R_CFIR_SYS
+  bbclr(0x8140+(path<<8),(1u<<8));                         // R_KIP B_KIP_RFGAIN
+  bbm(0x8150+(path<<8),0xffffffffu,0xe4e4e4e4);            // R_CFIR_MAP
+  bbclr(0x8154+(path<<8),(1u<<8));                         // R_CFIR_LUT SEL
+  bbclr(0x81cc+(path<<8),0x3f);                            // R_KIP_IQP B_KIP_IQP_IQSW
+  bbm(0x81dc+(path<<8),0xffffffffu,0x00000002);            // R_LOAD_COEF
+  wrf(path,0xef,(1u<<2),0x0);                              // RR_LUTWE LOK
+  wrf(path,0xde,(0x7fu<<13),0x0);                          // RR_RCKD POW
+  wrf(path,0xef,(1u<<2),0x0);
+  wrf(path,0x00,(0xfu<<16),0x3);                           // RR_MOD = V_RX(0x3)
+  wrf(path,0x5c,(1u<<19),0x0);                             // RR_TXRSV GAPK
+  wrf(path,0x5e,(1u<<19),0x0);                             // RR_BIAS GAPK
+  wrf(path,0x05,(1u<<0),0x1);                              // RR_RSV1 RST
+}
+static const uint32_t IQK_AFEBB_RESTORE[20][3]={
+  {0x20fc,0xffff0000,0x00000303},{0x12b8,0x40000000,0x0},{0x32b8,0x40000000,0x0},
+  {0x5864,0xc0000000,0x0},{0x7864,0xc0000000,0x0},{0x2008,0x01ffffff,0x0},
+  {0x0c1c,0x00000004,0x0},{0x0700,0x08000000,0x0},{0x0c70,0x0000001f,0x00000003},
+  {0x0c70,0x000003e0,0x00000003},{0x12a0,0x000ff000,0x0},{0x32a0,0x000ff000,0x0},
+  {0x0700,0x07000000,0x0},{0x5864,0x20000000,0x0},{0x7864,0x20000000,0x0},
+  {0x0c3c,0x00000200,0x0},{0x2320,0x00000001,0x0},{0x20fc,0xffff0000,0x0},
+  {0x58c8,0x01000000,0x0},{0x78c8,0x01000000,0x0},
+};
+static void iqk_afebb_restore(void){ for(int i=0;i<20;i++) bbm(IQK_AFEBB_RESTORE[i][0],IQK_AFEBB_RESTORE[i][1],IQK_AFEBB_RESTORE[i][2]); }
+static void iqk_chain(int path){
+  iqk_get_ch_info(path); iqk_macbb_setting(); iqk_preset(path); iqk_txclk_setting(path);
+  int ibias=1, lokfail=1;
+  for(int t=0;t<3 && lokfail;t++){
+    lok_res_table(path,ibias++); iqk_txk_setting(path);
+    if(t==0){ wrf(path,0x56,0xffff,0xe5e0); uint32_t g=rrf(path,0x56,0xffff);
+      P("    [gain-hold p%d] RR_GAINTX after txk_setting=0x%04x %s\n", path, g, g==0xe5e0?"HELD (RF LOK mode OK)":"NOT held"); }
+    lokfail=iqk_lok(path);
+    P("    [lok-try %d p%d] fail=%d chip0xF0=0x%x\n", t, path, lokfail, r32(0xf0));
+  }
+  txk_group_sel(path);          // TXK IQ cal (4 groups)
+  iqk_restore(path);            // restore this path out of cal mode (per _doiqk)
+}
+
+// live TSSI (rtw8852a_tssi order): 26 static rfk tables auto-generated verbatim + tmeter (thermal=0xff) +
+// enable. Runs AFTER live IQK to restore kernel cal order rx_dck->IQK->TSSI. Generated by genfn.awk.
+#include "tssi_all.c"
+#include "dpk_tbls.c"
+#include "dpk_live.c"
+#include "initcal.c"
+
 int main(int argc,char**argv){
   const char*blobpath = argc>1?argv[1]:"/tmp/replay3.bin";
   long startByte = argc>2?atol(argv[2]):0;
@@ -145,6 +325,33 @@ int main(int argc,char**argv){
   if(libusb_init(NULL)<0){P("libusb init fail\n");return 1;}
   if(reopen()<0){P("open fail\n");return 1;}
   P("entry 0x1e0=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xf0));
+
+  // DUMP_ONLY: read a broad register swath onto whatever state the chip is in (e.g. after a kernel bring-up
+  // + modprobe -r), write to the named file. Diff against a userspace-bring-up dump to find TX-enable regs.
+  if(getenv("DUMP_ONLY")){ dump_regs(getenv("DUMP_ONLY")); P("DUMP_ONLY -> %s (entry 0x1e0=0x%x)\n", getenv("DUMP_ONLY"), r32(0x1e0)); return 0; }
+
+  // INJECT_ONLY: no bring-up at all — just bulk-OUT the TX packets on EP5 onto whatever state the chip is in.
+  // Used to isolate: if the kernel left the chip TX-enabled and this radiates, our BRING-UP is the gap; if it
+  // still does not, our SUBMISSION differs from the kernel's.
+  if(getenv("INJECT_ONLY")){ char*injf=getenv("INJECT");
+    if(injf){ FILE*jf=fopen(injf,"rb"); if(jf){ fseek(jf,0,SEEK_END); long js=ftell(jf); fseek(jf,0,SEEK_SET); uint8_t*jb=malloc(js); fread(jb,1,js,jf); fclose(jf);
+      int reps=getenv("INJECT_REPS")?atoi(getenv("INJECT_REPS")):1; int okc=0,errc=0;
+      P("INJECT_ONLY: EP5, %ld bytes, %d reps, entry 0x1e0=0x%x\n", js, reps, r32(0x1e0));
+      for(int rep=0;rep<reps;rep++){ long q=0; while(q+2<=js){ int ln=jb[q]|(jb[q+1]<<8); q+=2; if(q+ln>js)break; int tr=0; int rc=libusb_bulk_transfer(dev,0x05,jb+q,ln,&tr,1000); if(rc==0)okc++; else{errc++; if(errc<=3)P("  rc=%d %s\n",rc,libusb_error_name(rc));} q+=ln; } usleep(4000); }
+      P("INJECT_ONLY done: ok=%d err=%d 0x1e0=0x%x 0xF0=0x%x\n", okc, errc, r32(0x1e0), r32(0xf0));
+    } }
+    return 0;
+  }
+
+  // DPKMEASURE: run ONLY the DPK (setup+sync+agc) onto whatever analog state the chip is already in (e.g.
+  // after a kernel bring-up + modprobe -r), NO userspace bring-up. Decides: does our DPK-sync measurement
+  // give kernel-level corr (~234) on a kernel-established analog foundation? If yes -> our replay bring-up is
+  // the culprit (live-init port will fix); if it stays ~141 -> our measurement/USB is the culprit.
+  if(getenv("DPKMEASURE")){
+    P("DPKMEASURE: DPK sync/agc on current chip state (NO bring-up), entry 0x1e0=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xf0));
+    dpk_live_run();
+    return 0;
+  }
 
   FILE*f=fopen(blobpath,"rb"); if(!f){P("no blob\n");return 1;}
   fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
@@ -182,8 +389,13 @@ int main(int argc,char**argv){
     } else if(kind==3){ int wv=G16(),wi=G16();
       libusb_control_transfer(dev,0xC0,0x05,wv,wi,rbuf,4,300); nr++;
     } else if(kind==4){ int wv=G16(),wi=G16(); uint32_t val=G32(); int addr=wv|(wi<<16);
+      // 0x1bff8 = the IQK/DPK one-shot DONE flag (byte0==0x55). Wait STRICTLY for it, longer, and log — this is
+      // the TX-calibration completion we need to verify actually happens during replay.
+      if(addr==0x1bff8){ int hit=0; uint32_t rr=0; for(int c=0;c<4000;c++){ rr=r32(addr); if((rr&0xff)==0x55){hit=1;break;} } if(!hit)ptmo++;
+        static int n1bff8=0; if(n1bff8<50){ n1bff8++; P("  [1bff8 #%d] %s rr=0x%x (want byte0=0x55, capval=0x%x)\n",n1bff8,hit?"DONE":"TIMEOUT",rr,val); } np++; }
+      else {
       // lenient: wait until all bits SET in the captured 'ready' value are set (or exact) — matches "wait for ready bit"
-      int hit=0; for(int c=0;c<600;c++){ uint32_t rr=r32(addr); if(rr==val || (rr&val)==val){hit=1;break;} } if(!hit)ptmo++; np++;
+      int hit=0; for(int c=0;c<600;c++){ uint32_t rr=r32(addr); if(rr==val || (rr&val)==val){hit=1;break;} } if(!hit)ptmo++; np++; }
     } else if(kind==2){ int ep=G8(),ln=G16();
       if(ep==7 && ln!=112){ // fwdl SECTION run: collect all consecutive ep7 non-header bulks, BURST them
         int cnt=0; long q=p-4; // rewind to this bulk's kind byte
@@ -210,7 +422,85 @@ int main(int argc,char**argv){
     if(ri%2000==0) P("  ..%ld (w=%ld r=%ld p=%ld b=%ld burst=%ld ptmo=%ld fail=%ld) 0x1e0=0x%x ce20=0x%x\n",ri,nw,nr,np,nb,bursts,ptmo,fail,r32(0x1e0),r32(0xce20));
   }
   P("REPLAY done: %ld ops (w=%ld r=%ld p=%ld b=%ld burst=%ld ptmo=%ld fail=%ld)\n",ri,nw,nr,np,nb,bursts,ptmo,fail);
-  P("  0x1e0=0x%x RX_FLTR(0xce20)=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xce20), r32(0xf0));
+  // WRFTEST: verify the RF-LSSI write path + masked-RMW helpers on real silicon after bring-up.
+  if(getenv("WRFTEST")){
+    P("WRFTEST: RF read-back after bring-up (chip 0xF0=0x%x)\n", r32(0xf0));
+    for(int p=0;p<2;p++){
+      uint32_t mod=rrf(p,0x00,RFREG_MASK), cfgch=rrf(p,0x18,RFREG_MASK), gaintx=rrf(p,0x56,0xffff);
+      P("  path%d: RR_MOD(0x00)=0x%05x  RR_CFGCH(0x18)=0x%05x (ch low=%u)  RR_GAINTX(0x56)=0x%04x\n",
+        p, mod, cfgch, cfgch&0xff, gaintx);
+    }
+    // masked write+readback: set RR_GAINTX low16 to the 2.4G LOK value 0xe5e0 (what _iqk_lok writes), read back
+    uint32_t before=rrf(0,0x56,0xffff);
+    wrf(0,0x56,0xffff,0xe5e0);
+    uint32_t after=rrf(0,0x56,0xffff);
+    P("  wrf RR_GAINTX: 0x%04x -> wrote 0xe5e0 -> 0x%04x  %s\n", before, after, after==0xe5e0?"OK (RF write path works)":"MISMATCH");
+    // masked-RMW on a BB reg: R_IQK_CFG(0x8034) B_IQK_CFG_SET(bits5:4) set to 3, read back
+    uint32_t b0=bbr(0x8034,0x30);
+    bbm(0x8034,0x30,0x3);
+    uint32_t b1=bbr(0x8034,0x30);
+    P("  bbm R_IQK_CFG[5:4]: %u -> wrote 3 -> %u  %s\n", b0, b1, b1==3?"OK (BB RMW works)":"MISMATCH");
+    // RF write on a host-controlled LUT scratch reg (RR_LUTWA=0x33) — not hardware-driven, so it must hold
+    uint32_t l0=rrf(0,0x33,RFREG_MASK); wrf(0,0x33,RFREG_MASK,0x155); uint32_t l1=rrf(0,0x33,RFREG_MASK);
+    P("  wrf RR_LUTWA(0x33): 0x%05x -> wrote 0x155 -> 0x%05x  %s  (chip 0xF0=0x%x)\n", l0, l1, (l1&0x1ff)==0x155?"OK (RF WRITE path works)":"still not held", r32(0xf0));
+  }
+  if(getenv("INITCAL")){ initcal(); }
+  if(getenv("IQKCHAIN")){
+    P("IQKCHAIN: live IQK->LOK after bring-up (chip 0xF0=0x%x, entry)\n", r32(0xf0));
+    iqk_chain(0);
+    iqk_chain(1);
+    iqk_afebb_restore();        // AFE/BB restore (nondbcc, both paths) — final exit from cal mode
+    P("IQKCHAIN done: chip 0xF0=0x%x 0x1e0=0x%x (healthy=%s)\n", r32(0xf0), r32(0x1e0), r32(0xf0)==0xc492537?"YES":"NO-WEDGED");
+  }
+  if(getenv("TSSILIVE")){
+    P("TSSILIVE: live TSSI after IQK (chip 0xF0=0x%x)\n", r32(0xf0));
+    tssi_live();
+    P("TSSILIVE done: chip 0xF0=0x%x 0x1e0=0x%x (healthy=%s)\n", r32(0xf0), r32(0x1e0), r32(0xf0)==0xc492537?"YES":"NO-WEDGED");
+  }
+  if(getenv("DPKLIVE")){ dpk_live_run(); }
+  if(getenv("DUMP")){ dump_regs(getenv("DUMP")); P("DUMP -> %s\n", getenv("DUMP")); }
+  // TXEN: after our bring-up, write a list of "0xADDR 0xVAL" lines (candidate TX-enable regs lifted from the
+  // kernel-vs-userspace diff) to see which make injection radiate. Applied before INJECT.
+  if(getenv("TXEN")){ FILE*tf=fopen(getenv("TXEN"),"r"); if(tf){ unsigned a,v; int nn=0;
+    while(fscanf(tf,"%x %x",&a,&v)==2){ uint8_t b[4]={v&0xff,(v>>8)&0xff,(v>>16)&0xff,(v>>24)&0xff}; libusb_control_transfer(dev,0x40,0x05,a&0xffff,(a>>16)&0xff,b,4,300); nn++; }
+    fclose(tf); P("TXEN: applied %d writes\n", nn); } }
+  P("  0x1e0=0x%x RX_FLTR(0xce20)=0x%x 0xF0=0x%x 0x1c060=0x%x\n", r32(0x1e0), r32(0xce20), r32(0xf0), r32(0x1c060));
+  // WARM-DELTA test: apply a captured `iw set channel` op stream onto the already-brought-up chip, exactly
+  // as an instant channel hop would. No fwdl, no 0x2f0 substitution — this is the warm retune under test.
+  if(argc>4){
+    FILE*wf=fopen(argv[4],"rb");
+    if(wf){ fseek(wf,0,SEEK_END); long wsz=ftell(wf); fseek(wf,0,SEEK_SET); uint8_t*wb=malloc(wsz); fread(wb,1,wsz,wf); fclose(wf);
+      long q=0,ww=0,wr=0,wp=0,wtmo=0; uint8_t rb2[64];
+      P("warm-delta: replaying %s (%ld bytes)\n", argv[4], wsz);
+      while(q<wsz){ int k=wb[q++];
+        if(k==1){ int brt=wb[q++],br=wb[q++],wv=wb[q]|(wb[q+1]<<8),wi=wb[q+2]|(wb[q+3]<<8),ln=wb[q+4]|(wb[q+5]<<8); q+=6; libusb_control_transfer(dev,brt,br,wv,wi,wb+q,ln,300); q+=ln; ww++; }
+        else if(k==3){ int wv=wb[q]|(wb[q+1]<<8),wi=wb[q+2]|(wb[q+3]<<8); q+=4; libusb_control_transfer(dev,0xC0,0x05,wv,wi,rb2,4,300); wr++; }
+        else if(k==4){ int wv=wb[q]|(wb[q+1]<<8),wi=wb[q+2]|(wb[q+3]<<8); uint32_t val=wb[q+4]|(wb[q+5]<<8)|(wb[q+6]<<16)|((uint32_t)wb[q+7]<<24); q+=8; int addr=wv|(wi<<16); int hit=0; for(int c=0;c<600;c++){ uint32_t rr=r32(addr); if(rr==val||(rr&val)==val){hit=1;break;} } if(!hit)wtmo++; wp++; }
+        else if(k==2){ int ep=wb[q++]; int ln=wb[q]|(wb[q+1]<<8); q+=2; int tr; libusb_bulk_transfer(dev,ep,wb+q,ln,&tr,1000); q+=ln; }
+        else break;
+      }
+      P("warm-delta done: %ld writes %ld reads %ld polls (%ld poll-timeouts) 0x1c060=0x%x 0x1e0=0x%x\n", ww,wr,wp,wtmo, r32(0x1c060), r32(0x1e0));
+      free(wb);
+    } else P("warm-delta: cannot open %s\n", argv[4]);
+  }
+  // DPKOFF: force DPK bypass before injecting. Hypothesis: our replay left DPK ENABLED with stale/wrong
+  // predistortion coefficients, which mangle the TX signal to nothing. _dpk_onoff(off) writes R_DPD_CH0A
+  // (0x81BC, USB +0x10000 = 0x181BC) byte3 = 0x6 (val=0) to disable. path A=0x181BC, path B=0x182BC.
+  if(getenv("DPKOFF")){
+    uint32_t regs[2]={0x181bc,0x182bc};
+    for(int i=0;i<2;i++){ uint32_t v=r32(regs[i]); uint32_t nv=(v&0x00ffffff)|(0x06u<<24); w32(regs[i],nv); P("DPKOFF: 0x%x 0x%x -> 0x%x (read 0x%x)\n",regs[i],v,nv,r32(regs[i])); }
+  }
+  // INJECT test: bulk-OUT captured TX packets ([txdesc][802.11 frame]) on EP5, the endpoint aireplay-ng uses.
+  // Proves the no-root userspace TX path. File format: [len:2LE][data] per packet.
+  { char*injf=getenv("INJECT");
+    if(injf){ FILE*jf=fopen(injf,"rb"); if(jf){ fseek(jf,0,SEEK_END); long js=ftell(jf); fseek(jf,0,SEEK_SET); uint8_t*jb=malloc(js); fread(jb,1,js,jf); fclose(jf);
+      int reps=getenv("INJECT_REPS")?atoi(getenv("INJECT_REPS")):1; long qtot=0; int okc=0,errc=0;
+      P("INJECT: bulk-OUT on EP5, %ld bytes, %d reps\n", js, reps);
+      for(int rep=0;rep<reps;rep++){ long q=0; while(q+2<=js){ int ln=jb[q]|(jb[q+1]<<8); q+=2; if(q+ln>js)break; int tr=0; int rc=libusb_bulk_transfer(dev,0x05,jb+q,ln,&tr,1000); if(rc==0)okc++; else {errc++; if(errc<=3)P("  inject rc=%d (%s)\n",rc,libusb_error_name(rc));} q+=ln; qtot++; } }
+      P("INJECT done: %ld packets, ok=%d err=%d 0x1e0=0x%x 0xF0=0x%x\n", qtot, okc, errc, r32(0x1e0), r32(0xf0));
+      free(jb);
+    } else P("INJECT: cannot open %s\n", injf); }
+  }
   // quick scan of other bulk-IN EPs in case C2H rides a separate pipe
   P("probing other IN EPs ...\n");
   for(int e=0x83;e<=0x87;e++){ if(e==0x84)continue; uint8_t rb[4096]; int tr=0;
