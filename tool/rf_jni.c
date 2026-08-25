@@ -32,7 +32,7 @@ static uint8_t* slurp(const char*path, long*outsz){
 // After this returns 0 the adapter is on-air on `channel`; the caller uses usb.bulk EP5/EP0x84 for TX/RX.
 JNIEXPORT jint JNICALL
 Java_apk_microspec_Ax56_nativeAttach(JNIEnv*env, jclass cls, jint fd, jint channel,
-    jstring jfw, jstring jblob, jlong startByte, jstring jlog){
+    jstring jfw, jstring jblob, jlong startByte, jstring jlog, jint cal){
   (void)cls; (void)channel;
   const char*fw   = (*env)->GetStringUTFChars(env, jfw,   NULL);
   const char*blobp= (*env)->GetStringUTFChars(env, jblob, NULL);
@@ -59,10 +59,17 @@ Java_apk_microspec_Ax56_nativeAttach(JNIEnv*env, jclass cls, jint fd, jint chann
   replay_ops(blob, bsz, (long)startByte);          // captured monitor-ch tail: BB/RF init + set-channel + RX filter
   free(blob);
 
-  initcal();                                       // INITCAL / RCK / DACK
-  iqk_chain(0); iqk_chain(1); iqk_afebb_restore();  // live IQK -> LOK, both paths, exit cal mode
-  tssi_live();                                     // live TSSI
-  dpk_live_run();                                  // live DPK
+  // Live TX calibration (IQK/TSSI/DPK) is 2.4 GHz-tuned and proven for the ch6 coexistence chat; it is NOT
+  // valid on a 5 GHz channel, and RX (the monitor map) needs no calibration at all. So cal is opt-in per channel:
+  // ch6 runs the full chain for clean TX, 5 GHz stays replay-only (RX-capable, TX uncalibrated).
+  if(cal){
+    initcal();                                     // INITCAL / RCK / DACK
+    iqk_chain(0); iqk_chain(1); iqk_afebb_restore(); // live IQK -> LOK, both paths, exit cal mode
+    tssi_live();                                   // live TSSI
+    dpk_live_run();                                // live DPK
+  } else {
+    P("attach: replay-only (cal skipped) — RX/monitor on channel %d\n", channel);
+  }
 
   P("attach done: 0x1e0=0x%x 0xF0=0x%x (healthy=%s)\n", r32(0x1e0), r32(0xf0),
     r32(0xf0)==0xc492537 ? "YES" : "check");
