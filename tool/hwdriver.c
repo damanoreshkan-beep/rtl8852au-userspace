@@ -30,7 +30,17 @@ static libusb_device_handle *dev;
 static FILE *LOG;
 #define P(...) do{ fprintf(LOG,__VA_ARGS__); fflush(LOG); }while(0)
 
+static int g_txfd = -1;   // set from env TXFD when driven via termux-usb (no-root Android): wrap that fd
+static const char* g_fwpath = "/tmp/fw_cut2_nic.bin";  // overridable via env FW (phone stages it elsewhere)
 static int reopen(void){
+  if(g_txfd >= 0){
+    // Android/Termux no-root path: termux-usb already opened+claimed the device and passed us its fd.
+    // Wrap it directly — no enumeration, no permission, no re-open (a wrapped fd cannot be reopened).
+    if(dev) return 0;
+    if(libusb_wrap_sys_device(NULL, (intptr_t)g_txfd, &dev) < 0 || !dev) return -1;
+    libusb_claim_interface(dev,0);   // harmless if termux-usb already claimed
+    return 0;
+  }
   if(dev){ libusb_release_interface(dev,0); libusb_close(dev); dev=NULL; }
   dev = libusb_open_device_with_vid_pid(NULL, 0x0b05, 0x1997);
   if(!dev) return -1;
@@ -317,13 +327,74 @@ static void iqk_chain(int path){
 #include "dpk_live.c"
 #include "initcal.c"
 
+// ---- software power-on table (rtw89 mac_pwron_nic_8852a, ported from native/cpp/rtw_pwron.c) ----
+// Byte R/W RMW + poll, filtered by cut+intf. Run on a WARM chip it re-walks the platform power-up (0x0005/
+// 0x0006 handshake + 0x0088 enable toggles), to test whether it substitutes for a physical cold replug.
+static uint8_t r8(uint32_t a){ uint8_t b=0; libusb_control_transfer(dev,0xc0,0x05,a&0xffff,(a>>16)&0xff,&b,1,300); return b; }
+static void w8(uint32_t a,uint8_t v){ libusb_control_transfer(dev,0x40,0x05,a&0xffff,(a>>16)&0xff,&v,1,300); }
+struct pwr_cfg { uint16_t addr; uint8_t cut; uint8_t intf; uint8_t cmd; uint8_t msk; uint8_t val; };
+// cmd: 0=WRITE 1=POLL 2=DELAY 3=END. cut: CAV1 CBV2 CCV4 ALL0xFF. intf: SDIO1 USB2=2 USB3=4 PCIE8 ALL0xF.
+static const struct pwr_cfg PWRON_TBL[] = {
+  {0x00C6,0x02,0x08,0,0x40,0x40},{0x1086,0xFF,0x01,0,0x01,0},{0x1086,0xFF,0x01,1,0x02,0x02},
+  {0x0005,0xFF,0x0F,0,0x18,0},{0x0005,0xFF,0x0F,0,0x80,0},{0x0005,0xFF,0x0F,0,0x04,0},
+  {0x0006,0xFF,0x0F,1,0x02,0x02},{0x0006,0xFF,0x0F,0,0x01,0x01},{0x0005,0xFF,0x0F,0,0x01,0x01},
+  {0x0005,0xFF,0x0F,1,0x01,0},{0x106D,0x06,0x06,0,0x40,0},
+  {0x0088,0xFF,0x0F,0,0x01,0x01},{0x0088,0xFF,0x0F,0,0x01,0},{0x0088,0xFF,0x0F,0,0x01,0x01},
+  {0x0088,0xFF,0x0F,0,0x01,0},{0x0088,0xFF,0x0F,0,0x01,0x01},
+  {0x0083,0xFF,0x0F,0,0x40,0},{0x0080,0xFF,0x0F,0,0x20,0x20},{0x0024,0xFF,0x0F,0,0x1F,0},
+  {0x02A0,0xFF,0x0F,0,0x02,0x02},{0x02A2,0xFF,0x0F,0,0xE0,0},{0x0071,0xFF,0x08,0,0x10,0},
+  {0x0010,0x01,0x08,0,0x04,0x04},{0x02A0,0x01,0x0F,0,0xC0,0},{0xFFFF,0xFF,0x0F,3,0,0},
+};
+static int pwr_seq_run(uint8_t cut,uint8_t intf){
+  int wr=0,pl=0;
+  for(const struct pwr_cfg*s=PWRON_TBL; s->cmd!=3; s++){
+    if(!(s->intf & intf) || !(s->cut & cut)) continue;
+    if(s->cmd==0){ uint8_t v=r8(s->addr); v=(v&~s->msk)|(s->val&s->msk); w8(s->addr,v); wr++; }
+    else if(s->cmd==1){ int ok=0; for(int c=2000;c;c--){ if((r8(s->addr)&s->msk)==(s->val&s->msk)){ok=1;break;} usleep(1000);} pl++; if(!ok){ P("  PWRON poll FAIL @0x%x\n",s->addr); return -2; } }
+    else if(s->cmd==2){ usleep(s->val==0? s->addr : s->addr*1000); }
+  }
+  P("  PWRON: %d writes %d polls\n",wr,pl); return 0;
+}
+
+// RXPROBE: a lightweight EP0x84 read that counts WIFI units + beacons, to see at which stage RX dies.
+static void rx_probe(const char*label){
+  int frames=0, wifi=0, beacons=0, empty=0, tcnt[16]={0};
+  for(int k=0;k<60 && empty<25;k++){ uint8_t rb[16384]; int tr=0;
+    int rc=libusb_bulk_transfer(dev,0x84,rb,sizeof rb,&tr,200);
+    if(rc!=0||tr<4){ empty++; continue; }
+    empty=0; frames++;
+    int off=0,guard=0;
+    while(off+16<=tr && guard++<64){
+      uint32_t d0=rb[off]|(rb[off+1]<<8)|(rb[off+2]<<16)|((uint32_t)rb[off+3]<<24);
+      int pktsize=d0&0x3fff, shift=(d0>>14)&3, rt=(d0>>24)&0xf, drvsize=(d0>>28)&7, rxdlen=((d0>>31)&1)?32:16;
+      if(pktsize==0) break;
+      tcnt[rt&0xf]++;
+      int foff=off+rxdlen+drvsize*8+shift;
+      if(rt==0 && pktsize>=24 && foff+24<=tr){ wifi++; uint16_t fc=rb[foff]|(rb[foff+1]<<8); if((fc&0xfc)==0x80) beacons++; }
+      int unit=rxdlen+drvsize*8+shift+pktsize; unit=(unit+7)&~7; off+=unit;
+    }
+  }
+  P("RXPROBE[%s]: bulk=%d wifi=%d beacons=%d types:", label, frames, wifi, beacons);
+  for(int t=0;t<16;t++) if(tcnt[t]) P(" t%d=%d",t,tcnt[t]);
+  P("\n");
+}
+
 int main(int argc,char**argv){
-  const char*blobpath = argc>1?argv[1]:"/tmp/replay3.bin";
-  long startByte = argc>2?atol(argv[2]):0;
-  int hbMode = argc>3 && argv[3][0]=='h';
-  LOG=fopen("/tmp/hwdriver.log","w");
+  // Env overrides argv so the same binary runs on the box (argv) and on Android via termux-usb (env + TXFD).
+  const char*blobpath = getenv("BLOB") ? getenv("BLOB") : (argc>1?argv[1]:"/tmp/replay3.bin");
+  long startByte = getenv("START") ? atol(getenv("START")) : (argc>2?atol(argv[2]):0);
+  int hbMode = getenv("HB") ? 1 : (argc>3 && argv[3][0]=='h');
+   if(getenv("TXFD")) g_txfd = atoi(getenv("TXFD"));
+  if(getenv("FW")) g_fwpath = getenv("FW");
+  LOG=fopen(getenv("LOG") ? getenv("LOG") : "/tmp/hwdriver.log","w");
+  if(!LOG) LOG=stderr;
+  // Android/no-root: libusb_init would try to enumerate USB via sysfs/udev and fail. Tell it not to discover
+  // devices — we hand it the fd from termux-usb directly. (No effect on the box path, which has no TXFD.)
+  if(g_txfd >= 0) libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
   if(libusb_init(NULL)<0){P("libusb init fail\n");return 1;}
-  if(reopen()<0){P("open fail\n");return 1;}
+  if(reopen()<0){P("open fail (txfd=%d)\n", g_txfd);return 1;}
+  if(getenv("RESET")){ uint32_t before=r32(0x1e0); int rc=libusb_reset_device(dev); P("RESET: entry 0x1e0=0x%x, libusb_reset_device rc=%d (%s)\n", before, rc, libusb_error_name(rc)); return 0; }
+  if(getenv("PWRON")){ uint32_t b=r32(0x1e0); int rc=pwr_seq_run(0x04,0x02); P("PWRON: rc=%d, 0x1e0 0x%x->0x%x 0x88=0x%x 0xF0=0x%x\n", rc, b, r32(0x1e0), r32(0x88), r32(0xf0)); if(getenv("PWRON_ONLY")) return 0; }
   P("entry 0x1e0=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0xf0));
 
   // DUMP_ONLY: read a broad register swath onto whatever state the chip is in (e.g. after a kernel bring-up
@@ -357,7 +428,7 @@ int main(int argc,char**argv){
   fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
   uint8_t*blob=malloc(sz); fread(blob,1,sz,f); fclose(f);
   if(hbMode){ P("running hwburst init+fwdl (cycle 1)...\n");
-    int rc=hwburst_fwdl("/tmp/fw_cut2_nic.bin");
+    int rc=hwburst_fwdl(g_fwpath);
     if(rc!=0){ P("*** FWDL DID NOT BOOT (STS!=7, 0x1e0=0x%x) -- chip dirty; COLD REPLUG needed. Aborting.\n",r32(0x1e0)); return 2; }
   }
   long p=startByte;
@@ -376,7 +447,7 @@ int main(int argc,char**argv){
       if(addr==0x2f0 && v0==0){ // maybe re-fwdl cycle start: substitute proven hwburst_fwdl, skip captured init+fwdl
         long endp=skip_to_after_fwdl(blob,p+ln,sz);
         if(endp>=0){ // real cycle: a fwdl header follows
-          int rc=hwburst_fwdl("/tmp/fw_cut2_nic.bin"); bursts++;
+          int rc=hwburst_fwdl(g_fwpath); bursts++;
           P("  [re-fwdl cycle @op %ld] hwburst rc=%d, skip %ld->%ld 0x1e0=0x%x\n",ri,rc,p+ln,endp,r32(0x1e0));
           p=endp; consecFail=0; continue;
         }
@@ -444,6 +515,7 @@ int main(int argc,char**argv){
     uint32_t l0=rrf(0,0x33,RFREG_MASK); wrf(0,0x33,RFREG_MASK,0x155); uint32_t l1=rrf(0,0x33,RFREG_MASK);
     P("  wrf RR_LUTWA(0x33): 0x%05x -> wrote 0x155 -> 0x%05x  %s  (chip 0xF0=0x%x)\n", l0, l1, (l1&0x1ff)==0x155?"OK (RF WRITE path works)":"still not held", r32(0xf0));
   }
+  if(getenv("RXPROBE")) rx_probe("post-bringup");
   if(getenv("INITCAL")){ initcal(); }
   if(getenv("IQKCHAIN")){
     P("IQKCHAIN: live IQK->LOK after bring-up (chip 0xF0=0x%x, entry)\n", r32(0xf0));
@@ -458,6 +530,7 @@ int main(int argc,char**argv){
     P("TSSILIVE done: chip 0xF0=0x%x 0x1e0=0x%x (healthy=%s)\n", r32(0xf0), r32(0x1e0), r32(0xf0)==0xc492537?"YES":"NO-WEDGED");
   }
   if(getenv("DPKLIVE")){ dpk_live_run(); }
+  if(getenv("RXPROBE")) rx_probe("post-cal");
   if(getenv("DUMP")){ dump_regs(getenv("DUMP")); P("DUMP -> %s\n", getenv("DUMP")); }
   // TXEN: after our bring-up, write a list of "0xADDR 0xVAL" lines (candidate TX-enable regs lifted from the
   // kernel-vs-userspace diff) to see which make injection radiate. Applied before INJECT.

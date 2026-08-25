@@ -8,3 +8,9 @@ native/test/*.o
 *.o
 *.so
 a.out
+# tool runtime artifacts: capture/replay blobs, proprietary fw, generated TX frames, logs, compiled binary
+tool/*.bin
+tool/*.log
+tool/*.pcap
+tool/*.out
+tool/ax56tx_c
