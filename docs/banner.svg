@@ -1,104 +1,95 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" font-family="'Segoe UI',system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 280" width="1000" height="280" font-family="'Segoe UI',system-ui,-apple-system,Helvetica,Arial,sans-serif" role="img" aria-label="RTL8852AU no-root userspace driver">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0c1424"/>
-      <stop offset="1" stop-color="#0a1a2b"/>
-    </linearGradient>
-    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#223349"/>
-      <stop offset="1" stop-color="#16233a"/>
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="0.55" stop-color="#0a0f1a"/>
+      <stop offset="1" stop-color="#070a12"/>
     </linearGradient>
     <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#38bdf8"/>
-      <stop offset="1" stop-color="#22d3ee"/>
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#34d399"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.35"/>
-      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    <radialGradient id="txglow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
     </radialGradient>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3.2"/>
+    </filter>
+    <clipPath id="card"><rect x="0" y="0" width="1000" height="280" rx="18"/></clipPath>
   </defs>
 
-  <rect x="0" y="0" width="1200" height="340" rx="16" fill="url(#bg)"/>
-  <rect x="0.5" y="0.5" width="1199" height="339" rx="16" fill="none" stroke="#1e2d43" stroke-width="1"/>
-
-  <!-- adapter illustration -->
-  <g transform="translate(190 172)">
-    <ellipse cx="0" cy="150" rx="150" ry="26" fill="url(#glow)"/>
-
-    <!-- antennas -->
-    <g stroke="#8fb6d6" stroke-width="9" stroke-linecap="round" fill="none">
-      <line x1="-26" y1="-52" x2="-96" y2="-150"/>
-      <line x1="26" y1="-52" x2="96" y2="-150"/>
+  <g clip-path="url(#card)">
+    <rect width="1000" height="280" fill="url(#bg)"/>
+    <!-- faint grid -->
+    <g stroke="#1b2740" stroke-width="1" opacity="0.45">
+      <path d="M0 70H1000M0 140H1000M0 210H1000"/>
+      <path d="M125 0V280M250 0V280M375 0V280M500 0V280M625 0V280M750 0V280M875 0V280"/>
     </g>
-    <circle cx="-96" cy="-150" r="7" fill="#cfe4f5"/>
-    <circle cx="96" cy="-150" r="7" fill="#cfe4f5"/>
 
-    <!-- RF rings, left tip -->
-    <g fill="none" stroke="url(#accent)" stroke-width="2.5">
-      <circle cx="-96" cy="-150" r="10">
-        <animate attributeName="r" values="6;46" dur="2.6s" repeatCount="indefinite"/>
-        <animate attributeName="opacity" values="0.9;0" dur="2.6s" repeatCount="indefinite"/>
+    <!-- radiating RF waves: the transmit-over-air achievement -->
+    <g fill="none" stroke="url(#accent)" stroke-width="2">
+      <circle cx="150" cy="180" r="10" opacity="0">
+        <animate attributeName="r" values="10;300" dur="3.4s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.7;0" dur="3.4s" repeatCount="indefinite"/>
       </circle>
-      <circle cx="-96" cy="-150" r="10">
-        <animate attributeName="r" values="6;46" dur="2.6s" begin="0.87s" repeatCount="indefinite"/>
-        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="0.87s" repeatCount="indefinite"/>
+      <circle cx="150" cy="180" r="10" opacity="0">
+        <animate attributeName="r" values="10;300" dur="3.4s" begin="1.13s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.7;0" dur="3.4s" begin="1.13s" repeatCount="indefinite"/>
       </circle>
-      <circle cx="-96" cy="-150" r="10">
-        <animate attributeName="r" values="6;46" dur="2.6s" begin="1.73s" repeatCount="indefinite"/>
-        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="1.73s" repeatCount="indefinite"/>
-      </circle>
-    </g>
-    <!-- RF rings, right tip -->
-    <g fill="none" stroke="url(#accent)" stroke-width="2.5">
-      <circle cx="96" cy="-150" r="10">
-        <animate attributeName="r" values="6;46" dur="2.6s" begin="0.43s" repeatCount="indefinite"/>
-        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="0.43s" repeatCount="indefinite"/>
-      </circle>
-      <circle cx="96" cy="-150" r="10">
-        <animate attributeName="r" values="6;46" dur="2.6s" begin="1.30s" repeatCount="indefinite"/>
-        <animate attributeName="opacity" values="0.9;0" dur="2.6s" begin="1.30s" repeatCount="indefinite"/>
+      <circle cx="150" cy="180" r="10" opacity="0">
+        <animate attributeName="r" values="10;300" dur="3.4s" begin="2.26s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.7;0" dur="3.4s" begin="2.26s" repeatCount="indefinite"/>
       </circle>
     </g>
 
-    <!-- body -->
-    <rect x="-44" y="-58" width="88" height="150" rx="14" fill="url(#body)" stroke="#31465f" stroke-width="1.5"/>
-    <rect x="-30" y="-40" width="60" height="20" rx="5" fill="#0e1a2b"/>
-    <circle cx="0" cy="16" r="17" fill="#0e1a2b" stroke="url(#accent)" stroke-width="2"/>
-    <circle cx="0" cy="16" r="6" fill="#22d3ee">
-      <animate attributeName="opacity" values="0.4;1;0.4" dur="2s" repeatCount="indefinite"/>
+    <!-- TX node: the AX56 adapter -->
+    <circle cx="150" cy="180" r="46" fill="url(#txglow)">
+      <animate attributeName="r" values="40;52;40" dur="3.4s" repeatCount="indefinite"/>
     </circle>
-    <rect x="-26" y="52" width="52" height="10" rx="3" fill="#25384f"/>
-
-    <!-- USB-A plug -->
-    <rect x="-18" y="92" width="36" height="30" rx="3" fill="#c9d6e2"/>
-    <rect x="-12" y="100" width="24" height="9" rx="1" fill="#8b98a5"/>
-  </g>
-
-  <!-- title block -->
-  <g transform="translate(430 0)">
-    <text x="0" y="112" fill="#e6edf3" font-size="46" font-weight="700" letter-spacing="-0.5">rtl8852au-userspace</text>
-    <text x="2" y="150" fill="#8b98a5" font-size="19">No-root, userspace monitor mode for the Realtek RTL8852AU over libusb.</text>
-    <text x="2" y="176" fill="#8b98a5" font-size="19">Firmware download, live 802.11 capture, radiotap with RSSI, channel hopping.</text>
-
-    <g font-family="ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace" font-size="13.5">
-      <g transform="translate(0 210)">
-        <rect x="0" y="0" width="150" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
-        <text x="75" y="20" fill="#7ed4f2" text-anchor="middle">firmware download</text>
-      </g>
-      <g transform="translate(162 210)">
-        <rect x="0" y="0" width="140" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
-        <text x="70" y="20" fill="#7ed4f2" text-anchor="middle">monitor capture</text>
-      </g>
-      <g transform="translate(314 210)">
-        <rect x="0" y="0" width="160" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
-        <text x="80" y="20" fill="#7ed4f2" text-anchor="middle">radiotap + RSSI</text>
-      </g>
-      <g transform="translate(486 210)">
-        <rect x="0" y="0" width="150" height="30" rx="15" fill="#10233a" stroke="#24425f"/>
-        <text x="75" y="20" fill="#7ed4f2" text-anchor="middle">channel hopping</text>
-      </g>
+    <g>
+      <rect x="120" y="158" width="60" height="44" rx="7" fill="#0e1a2b" stroke="url(#accent)" stroke-width="2"/>
+      <rect x="146" y="138" width="8" height="24" rx="4" fill="url(#accent)"/>
+      <circle cx="150" cy="134" r="5" fill="#34d399"/>
+      <text x="150" y="185" text-anchor="middle" fill="#8fe9dd" font-size="12" font-weight="700" letter-spacing="1">AX56</text>
     </g>
 
-    <text x="2" y="285" fill="#5b6b7d" font-size="14" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">ASUS USB-AX56  ·  RTL8852AU  ·  fw 0.13.36.2  ·  no kernel driver, no root</text>
+    <!-- RX node: the second receiver catching frames over the air -->
+    <g opacity="0.92">
+      <line x1="856" y1="150" x2="856" y2="128" stroke="#3b82f6" stroke-width="2"/>
+      <line x1="856" y1="128" x2="843" y2="116" stroke="#3b82f6" stroke-width="2"/>
+      <line x1="856" y1="128" x2="869" y2="116" stroke="#3b82f6" stroke-width="2"/>
+      <rect x="836" y="150" width="40" height="30" rx="5" fill="#0e1a2b" stroke="#3b82f6" stroke-width="2"/>
+      <circle cx="856" cy="165" r="4" fill="#60a5fa">
+        <animate attributeName="fill-opacity" values="0.2;1;0.2" dur="3.4s" begin="2.9s" repeatCount="indefinite"/>
+      </circle>
+      <text x="856" y="200" text-anchor="middle" fill="#7fb0f5" font-size="10" letter-spacing="0.5">899/900 · −30 dBm</text>
+    </g>
+
+    <!-- headline -->
+    <text x="60" y="70" fill="#eef4ff" font-size="46" font-weight="800" letter-spacing="0.5">RTL8852AU</text>
+    <text x="62" y="102" fill="url(#accent)" font-size="19" font-weight="600" letter-spacing="2.5">NO-ROOT USERSPACE Wi-Fi DRIVER</text>
+    <text x="62" y="128" fill="#7d8aa5" font-size="13.5" letter-spacing="0.3">ASUS USB-AX56 · driven entirely over libusb / usbfs — no kernel module, no root</text>
+
+    <!-- capability chips -->
+    <g font-size="12.5" font-weight="600">
+      <g transform="translate(360,158)">
+        <rect width="92" height="26" rx="13" fill="#0e2033" stroke="#22d3ee" stroke-opacity="0.5"/>
+        <circle cx="16" cy="13" r="4" fill="#34d399"/><text x="30" y="17" fill="#bfe9f5">monitor</text>
+      </g>
+      <g transform="translate(360,192)">
+        <rect width="92" height="26" rx="13" fill="#0e2033" stroke="#22d3ee" stroke-opacity="0.5"/>
+        <circle cx="16" cy="13" r="4" fill="#34d399"/><text x="30" y="17" fill="#bfe9f5">scan</text>
+      </g>
+      <g transform="translate(462,158)">
+        <rect width="118" height="26" rx="13" fill="#0e2033" stroke="#22d3ee" stroke-opacity="0.5"/>
+        <circle cx="16" cy="13" r="4" fill="#34d399"/><text x="30" y="17" fill="#bfe9f5">channel-hop</text>
+      </g>
+      <g transform="translate(462,192)">
+        <rect width="118" height="26" rx="13" fill="#122a1d" stroke="#34d399"/>
+        <circle cx="16" cy="13" r="4" fill="#facc15"><animate attributeName="fill-opacity" values="1;0.3;1" dur="1.6s" repeatCount="indefinite"/></circle>
+        <text x="30" y="17" fill="#c7f0d3" font-weight="700">TX inject</text>
+      </g>
+    </g>
   </g>
 </svg>
