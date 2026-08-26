@@ -356,6 +356,25 @@ static int pwr_seq_run(uint8_t cut,uint8_t intf){
   P("  PWRON: %d writes %d polls\n",wr,pl); return 0;
 }
 
+// mac_pwroff_nic_8852a (rtw8852a.c rtw8852a_pwroff[]) — USB2 rows, the full MAC power-DOWN. A warm-dirty chip
+// (0x1e0=0x23) that hwburst refuses is recovered by running this teardown first, then the power-on + fwdl again
+// (what the kernel does on rebind). Same {addr,cut,intf,cmd,msk,val} encoding as PWRON_TBL.
+static const struct pwr_cfg PWROFF_TBL[] = {
+  {0x02F0,0xFF,0x0F,0,0xFF,0},{0x02F1,0xFF,0x0F,0,0xFF,0},
+  {0x0006,0xFF,0x0F,0,0x01,0x01},{0x0002,0xFF,0x0F,0,0x03,0},{0x0082,0xFF,0x0F,0,0x03,0},
+  {0x106D,0x06,0x02,0,0x40,0x40},{0x0005,0xFF,0x0F,0,0x02,0x02},{0x0005,0xFF,0x0F,1,0x02,0},
+  {0x0007,0xFF,0x02,0,0x10,0},{0x0005,0x7C,0x02,0,0x18,0x08},{0xFFFF,0xFF,0x0F,3,0,0},
+};
+static int pwroff_run(uint8_t cut,uint8_t intf){
+  int wr=0,pl=0;
+  for(const struct pwr_cfg*s=PWROFF_TBL; s->cmd!=3; s++){
+    if(!(s->intf & intf) || !(s->cut & cut)) continue;
+    if(s->cmd==0){ uint8_t v=r8(s->addr); v=(v&~s->msk)|(s->val&s->msk); w8(s->addr,v); wr++; }
+    else if(s->cmd==1){ int ok=0; for(int c=2000;c;c--){ if((r8(s->addr)&s->msk)==(s->val&s->msk)){ok=1;break;} usleep(1000);} pl++; if(!ok){ P("  PWROFF poll FAIL @0x%x\n",s->addr); return -2; } }
+  }
+  P("  PWROFF: %d writes %d polls\n",wr,pl); return 0;
+}
+
 // RXPROBE: a lightweight EP0x84 read that counts WIFI units + beacons, to see at which stage RX dies.
 static void rx_probe(const char*label){
   int frames=0, wifi=0, beacons=0, empty=0, tcnt[16]={0};
@@ -378,6 +397,48 @@ static void rx_probe(const char*label){
   for(int t=0;t<16;t++) if(tcnt[t]) P(" t%d=%d",t,tcnt[t]);
   P("\n");
 }
+
+// ── live channel retune (the farm ax56.js recipe, via bbm/wrf which already carry the +0x10000 BB page) ──
+static uint8_t sco(int ch){ if(ch==1)return 109; if(ch<=6)return 108; if(ch<=10)return 107; if(ch<=14)return 106;
+  if(ch==36||ch==38)return 51; if(ch<=58)return 50; if(ch<=64)return 49; if(ch==100||ch==102)return 48;
+  if(ch<=126)return 47; if(ch<=151)return 46; if(ch<=177)return 45; return 0; }
+static void do_setch(int ch){ int is2g=ch<=14;
+  bbm(0x20fc,0xff000000,0xf); bbm(0x0704,0x2,0); usleep(40000);                 // bracket enter
+  for(int p=0;p<2;p++){ uint32_t rf=rrf(p,0x18,RFREG_MASK); rf&=~0x303ffu; rf|=ch; if(ch>14) rf|=(1u<<16)|(1u<<8); wrf(p,0x18,RFREG_MASK,rf); }
+  bbm(0x4644,0xc0000000,is2g?1:0); bbm(0x4718,0xc0000000,is2g?1:0);
+  bbm(0x4974,0x7f,sco(ch)); bbm(0x4498,0x40000000,is2g?1:0);
+  bbm(0x4974,0xc0000000,0); bbm(0x4978,0x3000,0); bbm(0x4978,0xf00,0);          // 20 MHz
+  uint32_t adc[2]={0x12d0,0x32d0},wbadc[2]={0x12ec,0x32ec};
+  for(int p=0;p<2;p++){ bbm(adc[p],0x6000,0); bbm(wbadc[p],0x30,2); uint32_t rf=rrf(p,0x18,RFREG_MASK); rf|=(1u<<11)|(1u<<10); wrf(p,0x18,RFREG_MASK,rf); }
+  bbm(0x20fc,0xff000000,0); bbm(0x0704,0x2,1);                                  // bracket leave (lock)
+}
+// _rck port (rtw8852a_rfk.c) — RC calibration per path; the lightest RFK step, touches RR_MOD(RX) + the RF clock
+// enable, the candidate for making the synthesiser re-lock to a freshly written RR_CFGCH.
+static void do_rck(int path){
+  uint32_t rf5=rrf(path,0x05,RFREG_MASK);          // save RR_RSV1
+  wrf(path,0x05,0x1,0x0);                           // RR_RSV1_RST=0
+  wrf(path,0x00,(0xfu<<16),0x3);                    // RR_MOD = V_RX
+  wrf(path,0x1b,RFREG_MASK,0x00240);                // RR_RCKC trigger
+  for(int i=0;i<20;i++){ if(rrf(path,0x1c,0x8)) break; usleep(2); }   // poll RF0x1c BIT3
+  uint32_t ca=rrf(path,0x1b,0x7c00);                // RR_RCKC_CA GENMASK(14,10)
+  wrf(path,0x1b,RFREG_MASK,ca);
+  wrf(path,0x1d,(0x1fu<<9),0x4);                    // RR_RCKO_OFF = 4
+  wrf(path,0xf0,0x2,0x1); wrf(path,0xf0,0x2,0x0);   // RR_RFC_CKEN toggle
+  wrf(path,0x05,RFREG_MASK,rf5);                    // restore RR_RSV1
+}
+// read EP0x84 for ~ms, tally beacon DS-channels, return the dominant channel (-1 if none), set *nbc = beacon count.
+static int rx_dom_ch(int ms,int*nbc){ int tally[200]={0},total=0; struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
+  for(;;){ uint8_t rb[16384]; int tr=0; int rc=libusb_bulk_transfer(dev,0x84,rb,sizeof rb,&tr,60);
+    if(rc==0 && tr>=4){ int off=0,guard=0;
+      while(off+16<=tr && guard++<64){ uint32_t d0=rb[off]|(rb[off+1]<<8)|(rb[off+2]<<16)|((uint32_t)rb[off+3]<<24);
+        int pktsize=d0&0x3fff, shift=(d0>>14)&3, rt=(d0>>24)&0xf, drvsize=(d0>>28)&7, rxdlen=((d0>>31)&1)?32:16;
+        if(pktsize==0) break; int foff=off+rxdlen+drvsize*8+shift;
+        if(rt==0 && pktsize>=36 && foff+pktsize<=tr){ uint16_t fc=rb[foff]|(rb[foff+1]<<8);
+          if((fc&0xfc)==0x80){ int p=foff+36,end=foff+pktsize; while(p+2<=end){ int tag=rb[p],ln=rb[p+1];
+            if(tag==3&&ln>=1){ int c=rb[p+2]; if(c>0&&c<200){tally[c]++;total++;} break;} p+=2+ln; } } }
+        int unit=rxdlen+drvsize*8+shift+pktsize; unit=(unit+7)&~7; off+=unit; } }
+    clock_gettime(CLOCK_MONOTONIC,&t1); if((t1.tv_sec-t0.tv_sec)*1000+(t1.tv_nsec-t0.tv_nsec)/1000000>=ms) break; }
+  int dom=-1,best=0; for(int c=0;c<200;c++) if(tally[c]>best){best=tally[c];dom=c;} if(nbc)*nbc=total; return dom; }
 
 // The captured-config replay loop, shared by main()'s box/termux path and the RF_LIB JNI bring-up: walk the
 // blob from startByte applying control writes(1)/reads(3)/polls(4)/bulks(2), with the 0x2f0 re-fwdl hwburst
@@ -497,6 +558,12 @@ int main(int argc,char**argv){
     return 0;
   }
 
+  // RECOVER: rescue a warm-dirty chip (0x1e0=0x23, which hwburst refuses) without a physical replug — the full
+  // MAC power-down then power-up, exactly what a kernel rebind does. Runs before fwdl so the cold path can proceed.
+  if(getenv("RECOVER")){ uint32_t b=r32(0x1e0);
+    P("RECOVER: entry 0x1e0=0x%x -> pwroff+pwron\n", b);
+    pwroff_run(0x04,0x02); usleep(10000); pwr_seq_run(0x04,0x02);
+    P("RECOVER done: 0x1e0=0x%x 0x88=0x%x 0xF0=0x%x\n", r32(0x1e0), r32(0x88), r32(0xf0)); }
   FILE*f=fopen(blobpath,"rb"); if(!f){P("no blob\n");return 1;}
   fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
   uint8_t*blob=malloc(sz); fread(blob,1,sz,f); fclose(f);
@@ -595,6 +662,28 @@ int main(int argc,char**argv){
   }
   // 0x84: walk AGGREGATED rxd units per transfer (rxd_short16/long32, frame off=rxdlen+drvsize*8+shift),
   // for WIFI(rt=0) units print 802.11 frame-control + addr3(BSSID). Dump first 6 raw transfers for offline check.
+  // SETCH: one live retune off the ch6 bring-up, confirmed by RX + timed. SWEEP: a full band pass, timed.
+  if(getenv("SETCH")){ int ch=atoi(getenv("SETCH"));
+    struct timespec a,b; clock_gettime(CLOCK_MONOTONIC,&a); do_setch(ch);
+    if(getenv("RCK")){ do_rck(0); do_rck(1); P("  + RCK\n"); }     // synth re-lock candidate
+    clock_gettime(CLOCK_MONOTONIC,&b);
+    double setms=(b.tv_sec-a.tv_sec)*1000.0+(b.tv_nsec-a.tv_nsec)/1e6;
+    uint32_t cfg=rrf(0,0x18,RFREG_MASK); int nbc=0,dom=rx_dom_ch(700,&nbc);
+    int ok=(dom==ch)||(dom>0&&(dom<=14)==(ch<=14)&&abs(dom-ch)<=2);
+    P("SETCH ch6->ch%d: RR_CFGCH=0x%05x(low=%u) retune=%.1fms  RX dom=ch%d beacons=%d  %s\n",
+      ch,cfg,cfg&0xff,setms,dom,nbc, ok?"*** RETUNE CONFIRMED ***":"(not confirmed)"); return 0; }
+  if(getenv("SWEEP")){ int chs[]={1,2,3,4,5,6,7,8,9,10,11,12,13,36,40,44,48,149,153,157,161,165};
+    int n=getenv("SWEEP5")?22:13, dwell=getenv("DWELL")?atoi(getenv("DWELL")):200;
+    P("SWEEP: %d channels, %dms dwell each\n",n,dwell);
+    struct timespec a,b,c,d; double setsum=0; int hits=0; clock_gettime(CLOCK_MONOTONIC,&a);
+    for(int i=0;i<n;i++){ int ch=chs[i]; clock_gettime(CLOCK_MONOTONIC,&c); do_setch(ch);
+      if(getenv("RCK")){ do_rck(0); do_rck(1); } clock_gettime(CLOCK_MONOTONIC,&d);
+      setsum+=(d.tv_sec-c.tv_sec)*1000.0+(d.tv_nsec-c.tv_nsec)/1e6;
+      int nbc=0,dom=rx_dom_ch(dwell,&nbc); int ok=dom>0&&(dom<=14)==(ch<=14)&&abs(dom-ch)<=2; if(ok)hits++;
+      P("  ch%-3d dom=ch%-3d beacons=%-3d %s\n",ch,dom,nbc,ok?"ok":dom<0?"quiet":"MISS"); }
+    clock_gettime(CLOCK_MONOTONIC,&b); double tot=(b.tv_sec-a.tv_sec)*1000.0+(b.tv_nsec-a.tv_nsec)/1e6;
+    P("SWEEP done: %d ch in %.0fms (%.1fms/ch: retune %.1fms + dwell %dms)  confirmed %d/%d\n",
+      n,tot,tot/n,setsum/n,dwell,hits,n); return 0; }
   P("reading RX EP 0x84 (aggregated rxd parse) ...\n");
   FILE*pc=pcap_open("/tmp/ax56.pcap"); int pcn=0;
   int curSig=0, haveSig=0, dumped2=0; // RSSI (dBm) from the most recent PPDU-status, applied to that PPDU's frames

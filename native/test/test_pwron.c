@@ -39,6 +39,16 @@ int main(void) {
     CHK(has106D, "USB-only entry 0x106D executed");
     CHK(!hasPCIE, "no PCIE-only entry (0x00C6/0x0071/0x0010) executed");
 
+    /* --- power-OFF table: the warm-chip teardown that RECOVER runs before power-on --- */
+    nwrite = 0; wr_n = 0;
+    int ro = rtw_pwr_seq(&io, PWR_CCV_MSK, INTF_USB2, pwroff_nic_8852a, nodelay);
+    printf("pwroff rtw_pwr_seq -> %d, writes=%d\n", ro, nwrite);
+    CHK(ro == 0, "power-off table completed (0x0005 bit1 poll satisfied)");
+    CHK(nwrite == 9, "9 teardown writes for USB2/CCV (PCIE/SDIO filtered out)");
+    int hasF0 = 0, has07 = 0;
+    for (int i = 0; i < wr_n; i++) { if (wr_addr[i] == 0x02F0) hasF0 = 1; if (wr_addr[i] == 0x0007) has07 = 1; }
+    CHK(hasF0 && has07, "teardown hits 0x02F0 (fwdl-state reset) and 0x0007 (USB disable)");
+
     printf(fails ? "\nRESULT: %d FAILURE(S)\n" : "\nRESULT: ALL PASS\n", fails);
     return fails ? 1 : 0;
 }

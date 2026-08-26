@@ -67,6 +67,24 @@ static const struct pwr_cfg pwron_nic_8852a[] = {
     {0xFFFF, PWR_CVALL,               INTF_ALL,  PWR_CMD_END,   0, 0},
 };
 
+/* mac_pwroff_nic_8852a[] (rtw8852a.c rtw8852a_pwroff[]) — USB2 rows, the MAC power-DOWN. Running this teardown
+ * before power-on rescues a warm/dirty chip (0x1e0=0x23) that fwdl would otherwise refuse: it is the same off->on
+ * a kernel rebind performs, so a session can re-attach without a physical replug. Phone-validated (hwdriver.c
+ * PWROFF_TBL + RECOVER): the off->on->fwdl path boots STS=7 on a warm chip. */
+static const struct pwr_cfg pwroff_nic_8852a[] = {
+    {0x02F0, PWR_CVALL,               INTF_ALL,  PWR_CMD_WRITE, 0xFF, 0},
+    {0x02F1, PWR_CVALL,               INTF_ALL,  PWR_CMD_WRITE, 0xFF, 0},
+    {0x0006, PWR_CVALL,               INTF_ALL,  PWR_CMD_WRITE, BIT(0), BIT(0)},
+    {0x0002, PWR_CVALL,               INTF_ALL,  PWR_CMD_WRITE, BIT(1)|BIT(0), 0},
+    {0x0082, PWR_CVALL,               INTF_ALL,  PWR_CMD_WRITE, BIT(1)|BIT(0), 0},
+    {0x106D, PWR_CBV_MSK|PWR_CCV_MSK, INTF_USB,  PWR_CMD_WRITE, BIT(6), BIT(6)},
+    {0x0005, PWR_CVALL,               INTF_ALL,  PWR_CMD_WRITE, BIT(1), BIT(1)},
+    {0x0005, PWR_CVALL,               INTF_ALL,  PWR_CMD_POLL,  BIT(1), 0},
+    {0x0007, PWR_CVALL,               INTF_USB,  PWR_CMD_WRITE, BIT(4), 0},
+    {0x0005, 0x7C /* CCV|CDV|CEV|CFV|CGV */, INTF_USB, PWR_CMD_WRITE, BIT(4)|BIT(3), BIT(3)},
+    {0xFFFF, PWR_CVALL,               INTF_ALL,  PWR_CMD_END,   0, 0},
+};
+
 /* sub_pwr_seq_start (pwr.c:118): walk the table, filtered by cut+intf. */
 int rtw_pwr_seq(struct rtw_io *io, uint8_t cut_msk, uint8_t intf_msk,
                 const struct pwr_cfg *seq, void (*delay_us)(uint32_t)) {
@@ -104,4 +122,10 @@ int rtw_pwron(struct rtw_io *io, uint8_t cut_msk, void (*delay_us)(uint32_t)) {
      * RSV_CTRL 0x001C) are on the low MAC page we already reach. Done as 32-bit RMW. */
     /* NOTE: boot-mode is usually clear on a fresh USB attach; this is a safety preamble. */
     return rtw_pwr_seq(io, cut_msk, INTF_USB2, pwron_nic_8852a, delay_us);
+}
+
+/* mac_pwr_switch(off) — the MAC teardown. Call before rtw_pwron on every attach so a warm/dirty chip
+ * (0x1e0=0x23, otherwise fwdl-refused) is recovered without a physical replug. Harmless on a clean chip. */
+int rtw_pwroff(struct rtw_io *io, uint8_t cut_msk, void (*delay_us)(uint32_t)) {
+    return rtw_pwr_seq(io, cut_msk, INTF_USB2, pwroff_nic_8852a, delay_us);
 }

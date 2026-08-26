@@ -20,6 +20,7 @@ void ax56_parse_frame(const uint8_t *buf, int len);         // frame-parser.cpp 
 // ported init chain (rtw_pwron.c / rtw_cpu.c / rtw_fwdl.c) — host-verified
 extern "C" {
     int     rtw_pwron(struct rtw_io *io, uint8_t cut_msk, void (*delay_us)(uint32_t));
+    int     rtw_pwroff(struct rtw_io *io, uint8_t cut_msk, void (*delay_us)(uint32_t));
     uint8_t rtw_read_cut(struct rtw_io *io);
     int     rtw_dmac_pre_init(struct rtw_io *io);   // DMAC_FUNC_EN + DLE(DLFW)
     int     rtw_hci_func_en(struct rtw_io *io);      // HCI TX/RX DMA (needs DMAC on first)
@@ -100,6 +101,12 @@ Java_world_anubis_ax56_UsbController_nativeInitDriver(JNIEnv *, jobject, jint fd
     uint8_t cut = rtw_read_cut(&io);
     LOGI("chip cut = %u", cut);
 
+    // Recover a warm/dirty chip (0x1e0=0x23, otherwise fwdl-refused) without a physical replug: the full MAC
+    // teardown before power-up — the same off->on a kernel rebind does. Harmless on a clean chip; its POLL may
+    // no-op on an already-off chip, so its result is not fatal. Phone-validated (hwdriver RECOVER: off->on->fwdl
+    // boots STS=7 on a warm chip). This is what lets a session re-attach instead of asking for a replug.
+    rtw_pwroff(&io, (uint8_t)(1u << cut), io_delay_us);
+    io_delay_us(10000);
     if (rtw_pwron(&io, (uint8_t)(1u << cut), io_delay_us) != 0) {
         LOGE("power-on failed"); goto fail;
     }

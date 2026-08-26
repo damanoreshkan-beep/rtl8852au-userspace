@@ -14,3 +14,4 @@ tool/*.log
 tool/*.pcap
 tool/*.out
 tool/ax56tx_c
+tool/ax56ch
