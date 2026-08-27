@@ -27,11 +27,13 @@ export function parseUnits(rx) {
       const fc = rx[foff] | (rx[foff + 1] << 8);
       const u = { rssi: curSig, type: (fc >> 2) & 3, subtype: (fc >> 4) & 0xf, toDS: (fc >> 8) & 1, fromDS: (fc >> 9) & 1,
         a1: mac(rx, foff + 4), a2: mac(rx, foff + 10), a3: mac(rx, foff + 16), ssid: null, channel: null };
-      if (u.type === 0 && (u.subtype === 8 || u.subtype === 5)) {
-        let p = foff + 24 + 12; const end = foff + pktsize;
+      if (u.type === 0 && (u.subtype === 8 || u.subtype === 5 || u.subtype === 4)) {   // beacon / probe-resp / probe-req
+        let p = foff + 24 + (u.subtype === 4 ? 0 : 12); const end = foff + pktsize; u.vend = [];   // probe-req has no fixed params
         while (p + 2 <= end) { const tag = rx[p], len = rx[p + 1]; if (p + 2 + len > end) break;
           if (tag === 0 && len <= 32) { try { u.ssid = dec.decode(rx.subarray(p + 2, p + 2 + len)); } catch { u.ssid = ""; } }
-          else if (tag === 3 && len >= 1) u.channel = rx[p + 2]; p += 2 + len; }
+          else if (tag === 3 && len >= 1) u.channel = rx[p + 2];
+          else if (tag === 221 && len >= 3) u.vend.push(mac(rx, p + 2).slice(0, 8));   // vendor-specific IE OUI (aa:bb:cc) — reveals the maker even behind a random MAC
+          p += 2 + len; }
       }
       out.push(u);
     }

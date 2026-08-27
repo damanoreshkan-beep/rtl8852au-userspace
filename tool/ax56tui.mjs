@@ -5,7 +5,7 @@
 //   deno run -A ax56tui.mjs [device]         # live (spawns termux-usb)
 //   deno run -A ax56tui.mjs --replay <file>  # replay a captured C/R stream (dev)
 import { parseUnits, BCAST, NIL, isRandomMac } from "./scanparse.mjs";
-import { vendorShort, loadOui } from "./ouilookup.mjs";
+import { vendorName, vendorFromIEs, loadOui } from "./ouilookup.mjs";
 loadOui();   // load the OUI table once at startup
 
 const TOOL = "/root/ax56-ctl/tool";
@@ -38,15 +38,17 @@ function seenAP(a3, u) {
 function seenClient(bssid, mac, u, assoc) {
   if (mac === BCAST || mac === NIL) return;
   const ap = aps.get(bssid); if (!ap) return;                 // only attach to an AP we actually know
-  const c = ap.clients.get(mac) || { rssi: null, count: 0, last: 0, assoc: false };
+  const c = ap.clients.get(mac) || { rssi: null, count: 0, last: 0, assoc: false, vend: new Set() };
   c.count++; c.last = now(); c.assoc = c.assoc || assoc; if (u.rssi != null) c.rssi = ema(c.rssi, u.rssi);
+  for (const o of u.vend || []) c.vend.add(o);
   ap.clients.set(mac, c); unassoc.delete(mac);                // promoted to a known AP's client
 }
 function seenProbe(mac, u) {
   if (mac === BCAST || mac === NIL) return;
   for (const ap of aps.values()) if (ap.clients.has(mac)) return;   // already an associated client
-  const c = unassoc.get(mac) || { rssi: null, count: 0, last: 0, probes: new Set() };
+  const c = unassoc.get(mac) || { rssi: null, count: 0, last: 0, probes: new Set(), vend: new Set() };
   c.count++; c.last = now(); if (u.rssi != null) c.rssi = ema(c.rssi, u.rssi); if (u.ssid) c.probes.add(u.ssid);
+  for (const o of u.vend || []) c.vend.add(o);
   unassoc.set(mac, c);
 }
 function ingest(u) {
@@ -64,8 +66,15 @@ function feedLine(line) {
 // ── render ───────────────────────────────────────────────────────────────────────────────────────────────
 const E = "\x1b[";
 const c = { reset: E + "0m", dim: E + "2m", bold: E + "1m", accent: E + "38;5;207m", ok: E + "38;5;77m", warn: E + "38;5;179m", bad: E + "38;5;167m", ink: E + "38;5;250m", mute: E + "38;5;242m", vend: E + "38;5;109m" };
-// a device's label: the resolved vendor when known (the MAC is hidden), else the raw MAC (+ rnd if randomized).
-const nameFor = (m) => { const v = vendorShort(m, 16); return v ? `${c.vend}${v}${c.reset}` : `${c.ink}${m}${c.reset}${isRandomMac(m) ? c.dim + " rnd" + c.reset : ""}`; };
+// a device's label: the resolved vendor when known (MAC hidden), else the maker recovered from the probe's
+// vendor IE with a "?" (works behind a randomized MAC — this is how iPhones/Androids show up), else the raw MAC.
+const nameFor = (m, vend) => {
+  const v = vendorName(m);
+  if (v) return `${c.vend}${v}${c.reset}`;
+  const iv = vendorFromIEs(vend ? [...vend] : null);
+  if (iv) return `${c.vend}${iv}${c.dim}?${c.reset}`;
+  return `${c.ink}${m}${c.reset}${isRandomMac(m) ? c.dim + " rnd" + c.reset : ""}`;
+};
 const sigColor = (r) => r == null ? c.mute : r >= -55 ? c.ok : r >= -72 ? c.warn : c.bad;
 const BARS = "▁▂▃▄▅▆▇█";
 const bar = (r) => { if (r == null) return "   "; const n = Math.max(0, Math.min(7, Math.round((r + 92) / 8))); return BARS[Math.min(7, n + 2)].repeat(1) + BARS[Math.min(7, n + 1)] + BARS[n]; };
@@ -107,11 +116,11 @@ function render() {
     if (out.length >= H - 3) { push(`${c.dim} … more${c.reset}`); break; }
     const s = sigColor(a.rssi);
     const tail = showData ? ` ${c.mute}${String(a.count)}${c.reset} ${age(a.last)}●${c.reset}` : "";
-    push(`${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset} ${s}${bar(a.rssi)}${rpad4(a.rssi)}${c.reset} ${c.ink}${pad(clip(a.ssid || "‹hidden›", essidW), essidW)}${c.reset}${showB ? " " + nameFor(a.b) : ""}${tail}`);
+    push(`${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset} ${s}${bar(a.rssi)}${rpad4(a.rssi)}${c.reset} ${c.ink}${(a.ssid || "‹hidden›").padEnd(essidW)}${c.reset}${showB ? " " + nameFor(a.b) : ""}${tail}`);
     const cls = [...a.clients.entries()].map(([m, d]) => ({ m, ...d })).sort((x, y) => (y.rssi ?? -999) - (x.rssi ?? -999));
     for (const cl of cls) {
       if (out.length >= H - 3) break;
-      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${nameFor(cl.m)}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
+      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${nameFor(cl.m, cl.vend)}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
     }
   }
   // unassociated (probing) stations
@@ -123,7 +132,7 @@ function render() {
       if (out.length >= H - 2) { push(`${c.dim} … +${un.length - shown}${c.reset}`); break; }
       shown++;
       const pr = [...u.probes].filter(Boolean).slice(0, 2).join(" ");
-      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m)}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
+      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m, u.vend)}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
     }
   }
   const footer = clip(`q·quit p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);
