@@ -6,6 +6,7 @@
 //   deno run -A ax56tui.mjs --replay <file>  # replay a captured C/R stream (dev)
 import { parseUnits, BCAST, NIL, isRandomMac } from "./scanparse.mjs";
 import { vendorName, vendorFromIEs, loadOui } from "./ouilookup.mjs";
+import { deviceClass } from "./fingerprint.mjs";
 loadOui();   // load the OUI table once at startup
 
 const TOOL = "/root/ax56-ctl/tool";
@@ -46,9 +47,10 @@ function seenClient(bssid, mac, u, assoc) {
 function seenProbe(mac, u) {
   if (mac === BCAST || mac === NIL) return;
   for (const ap of aps.values()) if (ap.clients.has(mac)) return;   // already an associated client
-  const c = unassoc.get(mac) || { rssi: null, count: 0, last: 0, probes: new Set(), vend: new Set() };
+  const c = unassoc.get(mac) || { rssi: null, count: 0, last: 0, probes: new Set(), vend: new Set(), tags: new Set(), he: false };
   c.count++; c.last = now(); if (u.rssi != null) c.rssi = ema(c.rssi, u.rssi); if (u.ssid) c.probes.add(u.ssid);
   for (const o of u.vend || []) c.vend.add(o);
+  for (const t of u.tags || []) c.tags.add(t); if (u.he) c.he = true;
   unassoc.set(mac, c);
 }
 function ingest(u) {
@@ -68,11 +70,13 @@ const E = "\x1b[";
 const c = { reset: E + "0m", dim: E + "2m", bold: E + "1m", accent: E + "38;5;207m", ok: E + "38;5;77m", warn: E + "38;5;179m", bad: E + "38;5;167m", ink: E + "38;5;250m", mute: E + "38;5;242m", vend: E + "38;5;109m" };
 // a device's label: the resolved vendor when known (MAC hidden), else the maker recovered from the probe's
 // vendor IE with a "?" (works behind a randomized MAC — this is how iPhones/Androids show up), else the raw MAC.
-const nameFor = (m, vend) => {
+const nameFor = (m, vend, fp) => {
   const v = vendorName(m);
   if (v) return `${c.vend}${v}${c.reset}`;
   const iv = vendorFromIEs(vend ? [...vend] : null);
   if (iv) return `${c.vend}${iv}${c.dim}?${c.reset}`;
+  const dc = fp ? deviceClass(fp) : null;
+  if (dc) return `${c.vend}${dc}${c.reset} ${c.dim}${m}${c.reset}`;   // randomized MAC, but fingerprinted from the probe
   return `${c.ink}${m}${c.reset}${isRandomMac(m) ? c.dim + " rnd" + c.reset : ""}`;
 };
 const sigColor = (r) => r == null ? c.mute : r >= -55 ? c.ok : r >= -72 ? c.warn : c.bad;
@@ -132,7 +136,7 @@ function render() {
       if (out.length >= H - 2) { push(`${c.dim} … +${un.length - shown}${c.reset}`); break; }
       shown++;
       const pr = [...u.probes].filter(Boolean).slice(0, 2).join(" ");
-      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m, u.vend)}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
+      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m, u.vend, { tags: u.tags, he: u.he, vend: [...u.vend] })}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
     }
   }
   const footer = clip(`q·quit p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);

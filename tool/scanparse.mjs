@@ -29,10 +29,12 @@ export function parseUnits(rx) {
         a1: mac(rx, foff + 4), a2: mac(rx, foff + 10), a3: mac(rx, foff + 16), ssid: null, channel: null };
       if (u.type === 0 && (u.subtype === 8 || u.subtype === 5 || u.subtype === 4)) {   // beacon / probe-resp / probe-req
         let p = foff + 24 + (u.subtype === 4 ? 0 : 12); const end = foff + pktsize; u.vend = [];   // probe-req has no fixed params
+        if (u.subtype === 4) u.tags = new Set();                                        // the probe's IE profile — a device fingerprint
         while (p + 2 <= end) { const tag = rx[p], len = rx[p + 1]; if (p + 2 + len > end) break;
           if (tag === 0 && len <= 32) { try { u.ssid = dec.decode(rx.subarray(p + 2, p + 2 + len)); } catch { u.ssid = ""; } }
           else if (tag === 3 && len >= 1) u.channel = rx[p + 2];
-          else if (tag === 221 && len >= 3) u.vend.push(mac(rx, p + 2).slice(0, 8));   // vendor-specific IE OUI (aa:bb:cc) — reveals the maker even behind a random MAC
+          else if (tag === 221 && len >= 3) u.vend.push(mac(rx, p + 2).slice(0, 8));   // vendor-specific IE OUI (aa:bb:cc)
+          if (u.subtype === 4) { u.tags.add(tag); if (tag === 255 && len >= 1 && rx[p + 2] === 35) u.he = true; }   // ext-tag 35 = HE (Wi-Fi 6)
           p += 2 + len; }
       }
       out.push(u);
