@@ -16,7 +16,8 @@ let device = args.find((a) => a.startsWith("/dev/")) || null;
 // ── model ────────────────────────────────────────────────────────────────────────────────────────────────
 const aps = new Map();       // bssid  -> { ssid, ch, rssi, count, last, clients:Map(mac->{rssi,count,last,assoc}) }
 const unassoc = new Map();   // mac    -> { rssi, count, last, probes:Set }
-let curCh = 0, totalFr = 0, band5 = false, paused = false, dwell = 300;
+let curCh = 0, totalFr = 0, paused = false, dwell = 300;
+const band5 = true;   // always scan 2.4 + 5 GHz, every channel
 let lockedCh = 0, sortMode = 0, prevFr = 0, prevT = Date.now(), pps = 0, spinI = 0;
 const SORTS = [["ch", "channel"], ["sig", "signal"], ["cli", "clients"], ["data", "packets"]];
 const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
@@ -125,7 +126,7 @@ function render() {
       push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m)}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
     }
   }
-  const footer = clip(`q·quit 5·band p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);
+  const footer = clip(`q·quit p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);
   let buf = E + "H" + E + "0J" + out.join(E + "0K\r\n") + E + "0K\r\n" + E + `${H};1H` + c.dim + footer + c.reset + E + "0K";
   Deno.stdout.writeSync(new TextEncoder().encode(buf));
 }
@@ -145,7 +146,7 @@ async function startLive() {
   status = "tap the USB permission popup… then cold bring-up ~20s";
   try { await new Deno.Command("mkfifo", { args: [FIFO] }).output(); } catch { /* exists */ }
   writeCtl();                                                  // hand the fresh scanner the current lock + dwell
-  const env = { ...Deno.env.toObject(), DWELL: String(dwell), LOOP: "1" }; if (band5) env.SCAN5 = "1"; else delete env.SCAN5;
+  const env = { ...Deno.env.toObject(), DWELL: String(dwell), LOOP: "1", SCAN5: "1" };   // always 2.4 + 5 GHz
   child = new Deno.Command("termux-usb", { args: ["-r", "-e", `${TOOL}/stream_cb.sh`, device], stdout: "null", stderr: "null", env }).spawn();
   child.status.then(() => { if (!paused) status = "adapter released — 5/p restart · q quit"; });
   (async () => {   // read the FIFO the callback streams into (open rendezvous with the callback's write-open)
@@ -171,7 +172,6 @@ async function keys() {
     const n = await Deno.stdin.read(b); if (n === null) break;
     const k = String.fromCharCode(b[0]);
     if (k === "q" || b[0] === 3) { cleanup(); stopLive(); Deno.exit(0); }
-    else if (k === "5" && !replay) { band5 = !band5; stopLive(); await startLive(); }
     else if (k === "p" && !replay) { paused = !paused; if (paused) stopLive(); else await startLive(); }
     else if (k === "[") { dwell = Math.max(120, dwell - 60); writeCtl(); }
     else if (k === "]") { dwell = Math.min(1500, dwell + 60); writeCtl(); }
