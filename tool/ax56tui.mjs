@@ -63,7 +63,8 @@ function feedLine(line) {
 // ── render ───────────────────────────────────────────────────────────────────────────────────────────────
 const E = "\x1b[";
 const c = { reset: E + "0m", dim: E + "2m", bold: E + "1m", accent: E + "38;5;207m", ok: E + "38;5;77m", warn: E + "38;5;179m", bad: E + "38;5;167m", ink: E + "38;5;250m", mute: E + "38;5;242m", vend: E + "38;5;109m" };
-const vtag = (m) => { const v = vendorShort(m); return v ? ` ${c.vend}${v}${c.reset}` : (isRandomMac(m) ? ` ${c.dim}rnd${c.reset}` : ""); };
+// a device's label: the resolved vendor when known (the MAC is hidden), else the raw MAC (+ rnd if randomized).
+const nameFor = (m) => { const v = vendorShort(m, 16); return v ? `${c.vend}${v}${c.reset}` : `${c.ink}${m}${c.reset}${isRandomMac(m) ? c.dim + " rnd" + c.reset : ""}`; };
 const sigColor = (r) => r == null ? c.mute : r >= -55 ? c.ok : r >= -72 ? c.warn : c.bad;
 const BARS = "▁▂▃▄▅▆▇█";
 const bar = (r) => { if (r == null) return "   "; const n = Math.max(0, Math.min(7, Math.round((r + 92) / 8))); return BARS[Math.min(7, n + 2)].repeat(1) + BARS[Math.min(7, n + 1)] + BARS[n]; };
@@ -105,11 +106,11 @@ function render() {
     if (out.length >= H - 3) { push(`${c.dim} … more${c.reset}`); break; }
     const s = sigColor(a.rssi);
     const tail = showData ? ` ${c.mute}${String(a.count)}${c.reset} ${age(a.last)}●${c.reset}` : "";
-    push(`${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset} ${s}${bar(a.rssi)}${rpad4(a.rssi)}${c.reset} ${c.ink}${pad(clip(a.ssid || "‹hidden›", essidW), essidW)}${c.reset}${showB ? " " + c.mute + a.b + c.reset + vtag(a.b) : ""}${tail}`);
+    push(`${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset} ${s}${bar(a.rssi)}${rpad4(a.rssi)}${c.reset} ${c.ink}${pad(clip(a.ssid || "‹hidden›", essidW), essidW)}${c.reset}${showB ? " " + nameFor(a.b) : ""}${tail}`);
     const cls = [...a.clients.entries()].map(([m, d]) => ({ m, ...d })).sort((x, y) => (y.rssi ?? -999) - (x.rssi ?? -999));
     for (const cl of cls) {
       if (out.length >= H - 3) break;
-      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${c.ink}${cl.m}${c.reset}${vtag(cl.m)}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
+      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${nameFor(cl.m)}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
     }
   }
   // unassociated (probing) stations
@@ -121,7 +122,7 @@ function render() {
       if (out.length >= H - 2) { push(`${c.dim} … +${un.length - shown}${c.reset}`); break; }
       shown++;
       const pr = [...u.probes].filter(Boolean).slice(0, 2).join(" ");
-      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${c.ink}${u.m}${c.reset}${vtag(u.m)}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
+      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m)}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
     }
   }
   const footer = clip(`q·quit 5·band p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);
