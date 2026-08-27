@@ -5,6 +5,8 @@
 //   deno run -A ax56tui.mjs [device]         # live (spawns termux-usb)
 //   deno run -A ax56tui.mjs --replay <file>  # replay a captured C/R stream (dev)
 import { parseUnits, BCAST, NIL, isRandomMac } from "./scanparse.mjs";
+import { vendorShort, loadOui } from "./ouilookup.mjs";
+loadOui();   // load the OUI table once at startup
 
 const TOOL = "/root/ax56-ctl/tool";
 const args = Deno.args;
@@ -60,7 +62,8 @@ function feedLine(line) {
 
 // ── render ───────────────────────────────────────────────────────────────────────────────────────────────
 const E = "\x1b[";
-const c = { reset: E + "0m", dim: E + "2m", bold: E + "1m", accent: E + "38;5;207m", ok: E + "38;5;77m", warn: E + "38;5;179m", bad: E + "38;5;167m", ink: E + "38;5;250m", mute: E + "38;5;242m" };
+const c = { reset: E + "0m", dim: E + "2m", bold: E + "1m", accent: E + "38;5;207m", ok: E + "38;5;77m", warn: E + "38;5;179m", bad: E + "38;5;167m", ink: E + "38;5;250m", mute: E + "38;5;242m", vend: E + "38;5;109m" };
+const vtag = (m) => { const v = vendorShort(m); return v ? ` ${c.vend}${v}${c.reset}` : (isRandomMac(m) ? ` ${c.dim}rnd${c.reset}` : ""); };
 const sigColor = (r) => r == null ? c.mute : r >= -55 ? c.ok : r >= -72 ? c.warn : c.bad;
 const BARS = "▁▂▃▄▅▆▇█";
 const bar = (r) => { if (r == null) return "   "; const n = Math.max(0, Math.min(7, Math.round((r + 92) / 8))); return BARS[Math.min(7, n + 2)].repeat(1) + BARS[Math.min(7, n + 1)] + BARS[n]; };
@@ -102,11 +105,11 @@ function render() {
     if (out.length >= H - 3) { push(`${c.dim} … more${c.reset}`); break; }
     const s = sigColor(a.rssi);
     const tail = showData ? ` ${c.mute}${String(a.count)}${c.reset} ${age(a.last)}●${c.reset}` : "";
-    push(`${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset} ${s}${bar(a.rssi)}${rpad4(a.rssi)}${c.reset} ${c.ink}${pad(clip(a.ssid || "‹hidden›", essidW), essidW)}${c.reset}${showB ? " " + c.mute + a.b + c.reset : ""}${tail}`);
+    push(`${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset} ${s}${bar(a.rssi)}${rpad4(a.rssi)}${c.reset} ${c.ink}${pad(clip(a.ssid || "‹hidden›", essidW), essidW)}${c.reset}${showB ? " " + c.mute + a.b + c.reset + vtag(a.b) : ""}${tail}`);
     const cls = [...a.clients.entries()].map(([m, d]) => ({ m, ...d })).sort((x, y) => (y.rssi ?? -999) - (x.rssi ?? -999));
     for (const cl of cls) {
       if (out.length >= H - 3) break;
-      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${c.ink}${cl.m}${c.reset}${isRandomMac(cl.m) ? c.dim + "~" + c.reset : ""}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
+      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${c.ink}${cl.m}${c.reset}${vtag(cl.m)}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
     }
   }
   // unassociated (probing) stations
@@ -118,7 +121,7 @@ function render() {
       if (out.length >= H - 2) { push(`${c.dim} … +${un.length - shown}${c.reset}`); break; }
       shown++;
       const pr = [...u.probes].filter(Boolean).slice(0, 2).join(" ");
-      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${c.ink}${u.m}${c.reset}${isRandomMac(u.m) ? c.dim + "~" + c.reset : ""}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
+      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${c.ink}${u.m}${c.reset}${vtag(u.m)}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
     }
   }
   const footer = clip(`q·quit 5·band p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);
