@@ -690,6 +690,7 @@ int main(int argc,char**argv){
     int n=(getenv("SCAN5")&&getenv("SCAN5")[0])?22:13, dwell=getenv("DWELL")?atoi(getenv("DWELL")):500, loop=getenv("LOOP")?1:0;
     const char*ctl=getenv("CTL"); int idx=0;                   // CTL = optional control file: a channel to LOCK onto (0/none = hop)
     do {
+      if(loop && getppid()==1) break;                          // parent (termux-usb) gone -> don't orphan-spin holding the device
       int lock=0,dov=0; if(ctl){ FILE*cf=fopen(ctl,"r"); if(cf){ if(fscanf(cf,"%d %d",&lock,&dov)<1) lock=0; fclose(cf); } }  // re-read each dwell -> live lock + dwell
       int dw = dov>0 ? dov : dwell, ch = lock>0 ? lock : chs[idx++ % n];
       do_setch(ch); do_rck(0); do_rck(1);
