@@ -4,9 +4,10 @@ const dec = new TextDecoder();
 const mac = (b, o) => Array.from(b.subarray(o, o + 6), (x) => x.toString(16).padStart(2, "0")).join(":");
 const fromHex = (h) => { const u = new Uint8Array(h.length / 2); for (let i = 0; i < u.length; i++) u[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16); return u; };
 
+let curSig = null;   // last PPDU-status RSSI, carried across transfers (a beacon's status can land in a prior one)
 function parseUnits(rx) {
   const out = []; const u32 = (o) => (rx[o] | (rx[o + 1] << 8) | (rx[o + 2] << 16) | (rx[o + 3] << 24)) >>> 0;
-  let off = 0, guard = 0, curSig = null;
+  let off = 0, guard = 0;
   while (off + 16 <= rx.length && guard++ < 256) {
     const d0 = u32(off);
     const pktsize = d0 & 0x3fff, shift = (d0 >> 14) & 3, rt = (d0 >> 24) & 0xf, drvsize = (d0 >> 28) & 7, rxdlen = ((d0 >>> 31) & 1) ? 32 : 16;
