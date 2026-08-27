@@ -687,7 +687,7 @@ int main(int argc,char**argv){
   // SCAN: hop the plan (do_setch + RCK per channel) and dump every EP0x84 transfer as `R <hex>` on stdout, for a
   // Deno pass to parse into an airodump table. LOG (chip chatter) stays on the log file; only R-lines hit stdout.
   if(getenv("SCAN")){ int chs[]={1,2,3,4,5,6,7,8,9,10,11,12,13,36,40,44,48,149,153,157,161,165};
-    int n=getenv("SCAN5")?22:13, dwell=getenv("DWELL")?atoi(getenv("DWELL")):500, loop=getenv("LOOP")?1:0;
+    int n=(getenv("SCAN5")&&getenv("SCAN5")[0])?22:13, dwell=getenv("DWELL")?atoi(getenv("DWELL")):500, loop=getenv("LOOP")?1:0;
     do { for(int i=0;i<n;i++){ int ch=chs[i]; do_setch(ch); do_rck(0); do_rck(1);
       printf("C %d\n",ch); fflush(stdout);                     // channel marker: R-lines until the next C are on `ch`
       struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);

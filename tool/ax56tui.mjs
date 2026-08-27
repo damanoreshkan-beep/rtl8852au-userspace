@@ -62,51 +62,55 @@ const pad = (s, n) => (s + " ".repeat(n)).slice(0, n);
 const mmss = (ms) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
 let status = "starting";
+const rpad4 = (v) => String(v ?? "—").padStart(4);
 function render() {
-  let sz; try { sz = Deno.consoleSize(); } catch { sz = { columns: 100, rows: 40 }; }
-  const { columns: W, rows: H } = sz;
+  let sz; try { sz = Deno.consoleSize(); } catch { sz = { columns: 72, rows: 40 }; }
+  const W = parseInt(Deno.env.get("COLS") || "") || sz.columns, H = parseInt(Deno.env.get("ROWS") || "") || sz.rows;
+  if (totalFr > 0 && (status.startsWith("tap") || status.startsWith("bringing"))) status = "live";
   const out = [];
   const push = (s) => { if (out.length < H - 1) out.push(s); };
   const nAP = aps.size, nSTA = [...aps.values()].reduce((a, d) => a + d.clients.size, 0) + unassoc.size;
-  const hop = paused ? `${c.warn}paused${c.reset}` : `${c.accent}↻ ${band5 ? "2.4+5" : "2.4"}GHz${c.reset}`;
-  push(`${c.bold}${c.accent} AX56 ${c.reset}${c.dim}scanner${c.reset}   ch ${c.bold}${String(curCh).padStart(3)}${c.reset} ${hop}   ${c.dim}up${c.reset} ${mmss(now() - t0)}   ${c.ink}${totalFr}${c.reset}${c.dim}fr${c.reset}   ${c.accent}${nAP}${c.reset} AP · ${c.accent}${nSTA}${c.reset} STA   ${c.dim}${status}${c.reset}`);
-  // channel occupancy strip (deep per-channel: AP+client counts)
+  // responsive columns for a phone terminal: BSSID + packets/age drop first as the screen narrows.
+  const showB = W >= 56, showData = W >= 46, indent = W < 40 ? 2 : 4;
+  const essidW = Math.max(7, Math.min(20, W - (showB ? 44 : showData ? 24 : 18)));
+  const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
+  const hop = paused ? `${c.warn}paused${c.reset}` : `${c.accent}↻${band5 ? "2.4+5" : "2.4"}${c.reset}`;
+  push(`${c.bold}${c.accent}AX56${c.reset} ${c.dim}ch${c.reset}${c.bold}${String(curCh).padStart(3)}${c.reset} ${hop} ${c.dim}${mmss(now() - t0)}${c.reset} ${c.accent}${nAP}${c.reset}${c.dim}ap${c.reset} ${c.accent}${nSTA}${c.reset}${c.dim}sta ${clip(status, Math.max(6, W - 30))}${c.reset}`);
+  // channel occupancy strip — deep per-channel view: one bar per channel, height = APs+clients there
   const perCh = new Map();
-  for (const d of aps.values()) { const k = d.ch || 0; const e = perCh.get(k) || { ap: 0, cl: 0 }; e.ap++; e.cl += d.clients.size; perCh.set(k, e); }
+  for (const d of aps.values()) { const k = d.ch || 0; const e = perCh.get(k) || 0; perCh.set(k, e + 1 + d.clients.size); }
   const chans = band5 ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 36, 40, 44, 48, 149, 153, 157, 161, 165] : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-  const strip = chans.map((ch) => { const e = perCh.get(ch); const on = ch === curCh; const col = on ? c.accent : e ? c.ink : c.mute; return `${col}${e ? BARS[Math.min(7, e.ap + e.cl)] : "·"}${c.reset}`; }).join("");
-  push(` ${c.dim}band${c.reset} ${strip}  ${c.dim}(bar = APs+clients per channel)${c.reset}`);
-  push(`${c.dim} ${"─".repeat(Math.min(W - 2, 76))}${c.reset}`);
-  push(` ${c.dim}CH  PWR  ESSID              BSSID / STATION      DATA  SEEN${c.reset}`);
-  // the MAP: APs grouped by channel, sorted by channel then signal, each AP with its clients nested
+  const strip = chans.map((ch) => { const e = perCh.get(ch); const col = ch === curCh ? c.accent : e ? c.ink : c.mute; return `${col}${e ? BARS[Math.min(7, e)] : "·"}${c.reset}`; }).join("");
+  push(`${c.dim}ch${c.reset} ${strip}`);
+  push(`${c.dim}${"─".repeat(Math.min(W, 80))}${c.reset}`);
+  // the MAP: APs by channel then signal, each AP with its clients nested
   const apList = [...aps.entries()].map(([b, d]) => ({ b, ...d })).sort((x, y) => (x.ch - y.ch) || ((y.rssi ?? -999) - (x.rssi ?? -999)));
   for (const a of apList) {
-    if (out.length >= H - 3) { push(`   ${c.dim}… more (narrow to APs by signal)${c.reset}`); break; }
+    if (out.length >= H - 3) { push(`${c.dim} … more${c.reset}`); break; }
     const s = sigColor(a.rssi);
-    push(` ${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset}  ${s}${bar(a.rssi)}${String(a.rssi ?? "—").padStart(4)}${c.reset} ${c.ink}${pad(a.ssid || "‹hidden›", 18)}${c.reset} ${c.mute}${a.b}${c.reset} ${String(a.count).padStart(5)} ${age(a.last)}●${c.reset}`);
+    const tail = showData ? ` ${c.mute}${String(a.count)}${c.reset} ${age(a.last)}●${c.reset}` : "";
+    push(`${c.bold}${String(a.ch ?? "·").padStart(2)}${c.reset} ${s}${bar(a.rssi)}${rpad4(a.rssi)}${c.reset} ${c.ink}${pad(clip(a.ssid || "‹hidden›", essidW), essidW)}${c.reset}${showB ? " " + c.mute + a.b + c.reset : ""}${tail}`);
     const cls = [...a.clients.entries()].map(([m, d]) => ({ m, ...d })).sort((x, y) => (y.rssi ?? -999) - (x.rssi ?? -999));
     for (const cl of cls) {
       if (out.length >= H - 3) break;
-      const cs = sigColor(cl.rssi);
-      push(`        ${cs}${String(cl.rssi ?? "—").padStart(4)}${c.reset} ${c.dim}└─${c.reset} ${c.ink}${cl.m}${c.reset}${isRandomMac(cl.m) ? c.dim + " rnd" + c.reset : ""} ${String(cl.count).padStart(4)} ${age(cl.last)}●${c.reset}`);
+      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${c.ink}${cl.m}${c.reset}${isRandomMac(cl.m) ? c.dim + "~" + c.reset : ""}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
     }
   }
   // unassociated (probing) stations
   const un = [...unassoc.entries()].map(([m, d]) => ({ m, ...d })).sort((x, y) => (y.rssi ?? -999) - (x.rssi ?? -999));
   if (un.length && out.length < H - 3) {
-    push(`${c.dim} ── ${un.length} unassociated (probing) ${"─".repeat(Math.max(0, Math.min(W - 30, 44)))}${c.reset}`);
+    push(`${c.dim}── ${un.length} probing ${"─".repeat(Math.max(0, Math.min(W - 12, 60)))}${c.reset}`);
     let shown = 0;
     for (const u of un) {
-      if (out.length >= H - 2) { push(`   ${c.dim}… +${un.length - shown} more${c.reset}`); break; }
+      if (out.length >= H - 2) { push(`${c.dim} … +${un.length - shown}${c.reset}`); break; }
       shown++;
-      const cs = sigColor(u.rssi), pr = [...u.probes].filter(Boolean).slice(0, 3).join(" ");
-      push(`     ${cs}${String(u.rssi ?? "—").padStart(4)}${c.reset} ${c.ink}${u.m}${c.reset}${isRandomMac(u.m) ? c.dim + " rnd" + c.reset : ""} ${String(u.count).padStart(4)}${pr ? c.dim + "  → " + pr + c.reset : ""}`);
+      const pr = [...u.probes].filter(Boolean).slice(0, 2).join(" ");
+      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${c.ink}${u.m}${c.reset}${isRandomMac(u.m) ? c.dim + "~" + c.reset : ""}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
     }
   }
-  const footer = `${c.dim} q quit · 5 band · p pause · [ ] dwell ${dwell}ms${c.reset}`;
-  let buf = E + "H" + E + "0J";                                // home + clear-below
-  buf += out.join(E + "0K\r\n") + E + "0K\r\n";
-  buf += E + `${H};1H` + footer + E + "0K";
+  const footer = clip(`q·quit  5·band  p·pause  [ ]·dwell ${dwell}ms`, W);
+  let buf = E + "H" + E + "0J" + out.join(E + "0K\r\n") + E + "0K\r\n" + E + `${H};1H` + c.dim + footer + c.reset + E + "0K";
   Deno.stdout.writeSync(new TextEncoder().encode(buf));
 }
 
@@ -118,18 +122,23 @@ async function pump(readable) {
     while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line) feedLine(line); }
   }
 }
-let child = null;
+const FIFO = `${TOOL}/ax56tui.fifo`;
+let child = null, fifoFile = null;
 async function startLive() {
   if (!device) { status = "no device — pass /dev/bus/usb/BBB/DDD"; return; }
-  status = "bringing up (cold ~20s)…";
+  status = "tap the USB permission popup… then cold bring-up ~20s";
+  try { await new Deno.Command("mkfifo", { args: [FIFO] }).output(); } catch { /* exists */ }
   const env = { ...Deno.env.toObject(), DWELL: String(dwell), LOOP: "1" }; if (band5) env.SCAN5 = "1"; else delete env.SCAN5;
-  const cmd = new Deno.Command("termux-usb", { args: ["-r", "-e", `${TOOL}/stream_cb.sh`, device], stdout: "piped", stderr: "null", env });
-  child = cmd.spawn();
-  pump(child.stdout).catch(() => {}).finally(() => { status = "stream ended — press 5/p to restart or q"; });
-  child.status.then(() => { status = "adapter released"; });
+  child = new Deno.Command("termux-usb", { args: ["-r", "-e", `${TOOL}/stream_cb.sh`, device], stdout: "null", stderr: "null", env }).spawn();
+  child.status.then(() => { if (!paused) status = "adapter released — 5/p restart · q quit"; });
+  (async () => {   // read the FIFO the callback streams into (open rendezvous with the callback's write-open)
+    try { fifoFile = await Deno.open(FIFO, { read: true }); await pump(fifoFile.readable); }
+    catch (e) { status = "fifo: " + (e.message || e); }
+    finally { if (!paused) status = "stream ended — 5/p restart · q quit"; }
+  })();
   setTimeout(() => { if (totalFr > 0) status = "live"; }, 1500);
 }
-function stopLive() { try { child?.kill("SIGTERM"); } catch { /* */ } child = null; }
+function stopLive() { try { child?.kill("SIGTERM"); } catch { /* */ } try { fifoFile?.close(); } catch { /* */ } child = null; fifoFile = null; }
 async function startReplay(file) {
   status = "replay " + file;
   const lines = (await Deno.readTextFile(file)).split("\n");
