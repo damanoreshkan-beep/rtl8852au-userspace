@@ -15,6 +15,13 @@ let device = args.find((a) => a.startsWith("/dev/")) || null;
 const aps = new Map();       // bssid  -> { ssid, ch, rssi, count, last, clients:Map(mac->{rssi,count,last,assoc}) }
 const unassoc = new Map();   // mac    -> { rssi, count, last, probes:Set }
 let curCh = 0, totalFr = 0, band5 = false, paused = false, dwell = 300;
+let lockedCh = 0, sortMode = 0, prevFr = 0, prevT = Date.now(), pps = 0, spinI = 0;
+const SORTS = [["ch", "channel"], ["sig", "signal"], ["cli", "clients"], ["data", "packets"]];
+const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+const CTL = `${TOOL}/ax56tui.ctl`;
+const writeCtl = () => { try { Deno.writeTextFileSync(CTL, `${lockedCh} ${dwell}`); } catch { /* */ } };
+const setLock = (ch) => { lockedCh = ch; writeCtl(); };
+const HOPCH = () => (band5 ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 36, 40, 44, 48, 149, 153, 157, 161, 165] : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 const t0 = Date.now();
 const now = () => Date.now();
 const ema = (o, r) => (o == null ? r : Math.round(o * 0.7 + r * 0.3));
@@ -75,8 +82,12 @@ function render() {
   const essidW = Math.max(7, Math.min(20, W - (showB ? 44 : showData ? 24 : 18)));
   const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
-  const hop = paused ? `${c.warn}paused${c.reset}` : `${c.accent}↻${band5 ? "2.4+5" : "2.4"}${c.reset}`;
-  push(`${c.bold}${c.accent}AX56${c.reset} ${c.dim}ch${c.reset}${c.bold}${String(curCh).padStart(3)}${c.reset} ${hop} ${c.dim}${mmss(now() - t0)}${c.reset} ${c.accent}${nAP}${c.reset}${c.dim}ap${c.reset} ${c.accent}${nSTA}${c.reset}${c.dim}sta ${clip(status, Math.max(6, W - 30))}${c.reset}`);
+  const nowt = now(), dt = (nowt - prevT) / 1000;              // packets-per-second + a pulse that spins while frames flow
+  if (dt >= 0.25) { pps = Math.round((totalFr - prevFr) / dt); prevFr = totalFr; prevT = nowt; }
+  if (pps > 0) spinI = (spinI + 1) % SPIN.length;
+  const rx = pps > 0 ? `${c.ok}${SPIN[spinI]}${c.reset}` : `${c.mute}·${c.reset}`;
+  const hop = lockedCh ? `${c.warn}▣${lockedCh}${c.reset}` : paused ? `${c.warn}paused${c.reset}` : `${c.accent}↻${band5 ? "2.4+5" : "2.4"}${c.reset}`;
+  push(`${c.bold}${c.accent}AX56${c.reset} ${c.dim}ch${c.reset}${c.bold}${String(curCh).padStart(3)}${c.reset} ${hop} ${rx}${c.ink}${String(pps).padStart(3)}${c.reset}${c.dim}/s${c.reset} ${c.accent}${nAP}${c.reset}${c.dim}ap${c.reset} ${c.accent}${nSTA}${c.reset}${c.dim}sta ${clip(status, Math.max(4, W - 42))}${c.reset}`);
   // channel occupancy strip — deep per-channel view: one bar per channel, height = APs+clients there
   const perCh = new Map();
   for (const d of aps.values()) { const k = d.ch || 0; const e = perCh.get(k) || 0; perCh.set(k, e + 1 + d.clients.size); }
@@ -84,8 +95,9 @@ function render() {
   const strip = chans.map((ch) => { const e = perCh.get(ch); const col = ch === curCh ? c.accent : e ? c.ink : c.mute; return `${col}${e ? BARS[Math.min(7, e)] : "·"}${c.reset}`; }).join("");
   push(`${c.dim}ch${c.reset} ${strip}`);
   push(`${c.dim}${"─".repeat(Math.min(W, 80))}${c.reset}`);
-  // the MAP: APs by channel then signal, each AP with its clients nested
-  const apList = [...aps.entries()].map(([b, d]) => ({ b, ...d })).sort((x, y) => (x.ch - y.ch) || ((y.rssi ?? -999) - (x.rssi ?? -999)));
+  // the MAP: APs sorted by the chosen key, each AP with its clients nested
+  const sorters = { ch: (x, y) => (x.ch - y.ch) || ((y.rssi ?? -999) - (x.rssi ?? -999)), sig: (x, y) => (y.rssi ?? -999) - (x.rssi ?? -999), cli: (x, y) => (y.clients.size - x.clients.size) || ((y.rssi ?? -999) - (x.rssi ?? -999)), data: (x, y) => y.count - x.count };
+  const apList = [...aps.entries()].map(([b, d]) => ({ b, ...d })).sort(sorters[SORTS[sortMode][0]]);
   for (const a of apList) {
     if (out.length >= H - 3) { push(`${c.dim} … more${c.reset}`); break; }
     const s = sigColor(a.rssi);
@@ -109,7 +121,7 @@ function render() {
       push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${c.ink}${u.m}${c.reset}${isRandomMac(u.m) ? c.dim + "~" + c.reset : ""}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
     }
   }
-  const footer = clip(`q·quit  5·band  p·pause  [ ]·dwell ${dwell}ms`, W);
+  const footer = clip(`q·quit 5·band p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);
   let buf = E + "H" + E + "0J" + out.join(E + "0K\r\n") + E + "0K\r\n" + E + `${H};1H` + c.dim + footer + c.reset + E + "0K";
   Deno.stdout.writeSync(new TextEncoder().encode(buf));
 }
@@ -128,6 +140,7 @@ async function startLive() {
   if (!device) { status = "no device — pass /dev/bus/usb/BBB/DDD"; return; }
   status = "tap the USB permission popup… then cold bring-up ~20s";
   try { await new Deno.Command("mkfifo", { args: [FIFO] }).output(); } catch { /* exists */ }
+  writeCtl();                                                  // hand the fresh scanner the current lock + dwell
   const env = { ...Deno.env.toObject(), DWELL: String(dwell), LOOP: "1" }; if (band5) env.SCAN5 = "1"; else delete env.SCAN5;
   child = new Deno.Command("termux-usb", { args: ["-r", "-e", `${TOOL}/stream_cb.sh`, device], stdout: "null", stderr: "null", env }).spawn();
   child.status.then(() => { if (!paused) status = "adapter released — 5/p restart · q quit"; });
@@ -156,8 +169,11 @@ async function keys() {
     if (k === "q" || b[0] === 3) { cleanup(); stopLive(); Deno.exit(0); }
     else if (k === "5" && !replay) { band5 = !band5; stopLive(); await startLive(); }
     else if (k === "p" && !replay) { paused = !paused; if (paused) stopLive(); else await startLive(); }
-    else if (k === "[") { dwell = Math.max(120, dwell - 60); }
-    else if (k === "]") { dwell = Math.min(1500, dwell + 60); }
+    else if (k === "[") { dwell = Math.max(120, dwell - 60); writeCtl(); }
+    else if (k === "]") { dwell = Math.min(1500, dwell + 60); writeCtl(); }
+    else if (k === "c") { setLock(lockedCh ? 0 : (curCh || HOPCH()[0])); }
+    else if (k === "," || k === ".") { const list = HOPCH(); let i = list.indexOf(lockedCh || curCh); if (i < 0) i = 0; i = (i + (k === "." ? 1 : list.length - 1)) % list.length; setLock(list[i]); }
+    else if (k === "s") { sortMode = (sortMode + 1) % SORTS.length; }
   }
 }
 

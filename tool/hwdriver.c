@@ -688,12 +688,17 @@ int main(int argc,char**argv){
   // Deno pass to parse into an airodump table. LOG (chip chatter) stays on the log file; only R-lines hit stdout.
   if(getenv("SCAN")){ int chs[]={1,2,3,4,5,6,7,8,9,10,11,12,13,36,40,44,48,149,153,157,161,165};
     int n=(getenv("SCAN5")&&getenv("SCAN5")[0])?22:13, dwell=getenv("DWELL")?atoi(getenv("DWELL")):500, loop=getenv("LOOP")?1:0;
-    do { for(int i=0;i<n;i++){ int ch=chs[i]; do_setch(ch); do_rck(0); do_rck(1);
+    const char*ctl=getenv("CTL"); int idx=0;                   // CTL = optional control file: a channel to LOCK onto (0/none = hop)
+    do {
+      int lock=0,dov=0; if(ctl){ FILE*cf=fopen(ctl,"r"); if(cf){ if(fscanf(cf,"%d %d",&lock,&dov)<1) lock=0; fclose(cf); } }  // re-read each dwell -> live lock + dwell
+      int dw = dov>0 ? dov : dwell, ch = lock>0 ? lock : chs[idx++ % n];
+      do_setch(ch); do_rck(0); do_rck(1);
       printf("C %d\n",ch); fflush(stdout);                     // channel marker: R-lines until the next C are on `ch`
       struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
       for(;;){ uint8_t rb[16384]; int tr=0;
         if(libusb_bulk_transfer(dev,0x84,rb,sizeof rb,&tr,60)==0 && tr>=4){ fputs("R ",stdout); for(int j=0;j<tr;j++) printf("%02x",rb[j]); fputc('\n',stdout); fflush(stdout); }
-        clock_gettime(CLOCK_MONOTONIC,&t1); if((t1.tv_sec-t0.tv_sec)*1000+(t1.tv_nsec-t0.tv_nsec)/1000000>=dwell) break; } } } while(loop);
+        clock_gettime(CLOCK_MONOTONIC,&t1); if((t1.tv_sec-t0.tv_sec)*1000+(t1.tv_nsec-t0.tv_nsec)/1000000>=dw) break; }
+    } while(loop);
     fflush(stdout); return 0;
   }
   P("reading RX EP 0x84 (aggregated rxd parse) ...\n");

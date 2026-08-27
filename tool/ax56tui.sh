@@ -9,4 +9,4 @@ if [ -z "$DEV" ]; then
   DEV=$(find_wifi)
 fi
 [ -z "$DEV" ] && { echo "AX56 not found — plug it in and grant USB access."; exit 1; }
-exec deno run --allow-read --allow-run --allow-env ax56tui.mjs "$DEV" "$@"
+exec deno run --allow-read --allow-write --allow-run --allow-env ax56tui.mjs "$DEV" "$@"
