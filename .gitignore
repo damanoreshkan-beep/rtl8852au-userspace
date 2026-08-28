@@ -15,3 +15,15 @@ tool/*.pcap
 tool/*.out
 tool/ax56tx_c
 tool/ax56ch
+# tool runtime control/state: named pipes, channel-lock, ping/TX request, launcher status
+tool/*.fifo
+tool/*.ctl
+tool/*.ping
+tool/*.status
+# build scratch + local agent/skill/editor state + capture dumps
+tool/.build*
+tool/.table.txt
+tool/.agents/
+tool/.claude/
+tool/skills-lock.json
+captures/

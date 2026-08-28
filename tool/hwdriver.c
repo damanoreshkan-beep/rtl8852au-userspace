@@ -440,6 +440,125 @@ static int rx_dom_ch(int ms,int*nbc){ int tally[200]={0},total=0; struct timespe
     clock_gettime(CLOCK_MONOTONIC,&t1); if((t1.tv_sec-t0.tv_sec)*1000+(t1.tv_nsec-t0.tv_nsec)/1000000>=ms) break; }
   int dom=-1,best=0; for(int c=0;c<200;c++) if(tally[c]>best){best=tally[c];dom=c;} if(nbc)*nbc=total; return dom; }
 
+// RTS active-ping: send an RTS to a station on its channel and count CTS/ACK replies to our TA — a MAC-layer
+// "are you there" that a present station answers regardless of association (does NOT de-randomize its MAC).
+static const uint8_t TXD48[48]={0x85,0x04,0x48,0x00,0,0,0,0,0x2a,0x00,0x24,0x00,0,0,0,0, 0,0,0,0,0,0,0,0,0x00,0x04,0x00,0x40,0,0,0,0x90, 0,0,0,0,0,0x04,0,0,0x02,0,0,0x80,0,0,0,0};
+static int parse_mac(const char*s,uint8_t*o){ return sscanf(s,"%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",&o[0],&o[1],&o[2],&o[3],&o[4],&o[5])==6; }
+// Build one low-level 802.11 frame into f[] per template. Catalogue of standard injectable frames used for
+// AUTHORIZED testing of one's OWN network (the canonical aireplay-ng / mdk4 / 802.11 set). ra=target, ta=us.
+// deauth/beacon are dual-use: single-shot only, intended for own-device resilience/rogue-AP testing. Returns len.
+static int build_frame(uint8_t*f,const char*tmpl,const uint8_t*ra,const uint8_t*ta){
+  int fl=0; uint8_t bc[6]={0xff,0xff,0xff,0xff,0xff,0xff};
+  #define RATES() do{ f[fl++]=0x01;f[fl++]=0x04;f[fl++]=0x02;f[fl++]=0x04;f[fl++]=0x0b;f[fl++]=0x16; }while(0)
+  if(!strcmp(tmpl,"rts")){
+    f[fl++]=0xb4;f[fl++]=0x00;f[fl++]=0x3a;f[fl++]=0x01;                      // RTS control
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6;                         // RA=target, TA=us
+  } else if(!strcmp(tmpl,"cts")){
+    f[fl++]=0xc4;f[fl++]=0x00;f[fl++]=0x3a;f[fl++]=0x01;                      // CTS-to-self (reserve airtime/NAV)
+    memcpy(f+fl,ta,6);fl+=6;                                                  // RA=us
+  } else if(!strcmp(tmpl,"null")){
+    f[fl++]=0x48;f[fl++]=0x01;f[fl++]=0x00;f[fl++]=0x00;                      // data null-func, toDS (keepalive)
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00;
+  } else if(!strcmp(tmpl,"qos")){
+    f[fl++]=0x88;f[fl++]=0x01;f[fl++]=0x00;f[fl++]=0x00;                      // QoS null (power-save trigger)
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00; f[fl++]=0x00;f[fl++]=0x00;
+  } else if(!strcmp(tmpl,"dprobe")){                                          // directed probe-request -> one AP
+    f[fl++]=0x40;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00; f[fl++]=0x00;f[fl++]=0x00; RATES();
+  } else if(!strcmp(tmpl,"auth")){                                           // open-system auth request
+    f[fl++]=0xb0;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00;                                                // seq
+    f[fl++]=0x00;f[fl++]=0x00; f[fl++]=0x01;f[fl++]=0x00; f[fl++]=0x00;f[fl++]=0x00; // algo=open, authseq=1, status=0
+  } else if(!strcmp(tmpl,"assoc")){                                          // association request
+    f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00;                                                // seq
+    f[fl++]=0x01;f[fl++]=0x00; f[fl++]=0x0a;f[fl++]=0x00;                     // cap, listen interval
+    f[fl++]=0x00;f[fl++]=0x00; RATES();                                       // SSID(wildcard) + rates
+  } else if(!strcmp(tmpl,"reassoc")){                                        // reassociation request
+    f[fl++]=0x20;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00;                                                // seq
+    f[fl++]=0x01;f[fl++]=0x00; f[fl++]=0x0a;f[fl++]=0x00;                     // cap, listen interval
+    memcpy(f+fl,ra,6);fl+=6;                                                  // current AP address
+    f[fl++]=0x00;f[fl++]=0x00; RATES();                                       // SSID(wildcard) + rates
+  } else if(!strcmp(tmpl,"pspoll")){                                         // PS-Poll (power-save poll, control)
+    f[fl++]=0xa4;f[fl++]=0x00; f[fl++]=0x00;f[fl++]=0xc0;                     // FC, AID (bits 14-15 set)
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6;                         // BSSID=target, TA=us
+  } else if(!strcmp(tmpl,"bar")){                                            // Block-Ack Request (control)
+    f[fl++]=0x84;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6;                         // RA=target, TA=us
+    f[fl++]=0x04;f[fl++]=0x00; f[fl++]=0x00;f[fl++]=0x00;                     // BAR control, starting seq
+  } else if(!strcmp(tmpl,"action")){                                         // Action frame (public category)
+    f[fl++]=0xd0;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00;                                                // seq
+    f[fl++]=0x04;f[fl++]=0x00;                                                // category=Public, action=0
+  } else if(!strcmp(tmpl,"atim")){                                          // ATIM (IBSS announcement)
+    f[fl++]=0x90;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,ra,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ra,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00;                                                // seq
+  } else if(!strcmp(tmpl,"beacon")){                                         // beacon advertising SSID "AX56-TEST"
+    // Non-destructive proof-of-transmission: a nearby device's normal Wi-Fi scan will SEE this SSID appear,
+    // confirming the adapter actually radiates. One test SSID (not a flood of fake APs).
+    f[fl++]=0x80;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,bc,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,ta,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00;                                                // seq
+    for(int i=0;i<8;i++)f[fl++]=0x00; f[fl++]=0x64;f[fl++]=0x00; f[fl++]=0x01;f[fl++]=0x00; // timestamp, interval, cap
+    const char*ss="AX56-TEST"; f[fl++]=0x00;f[fl++]=(uint8_t)strlen(ss); memcpy(f+fl,ss,strlen(ss)); fl+=strlen(ss);
+    RATES();
+  } else {                                                                    // probe (default): broadcast discovery
+    f[fl++]=0x40;f[fl++]=0x00;f[fl++]=0x00;f[fl++]=0x00;
+    memcpy(f+fl,bc,6);fl+=6; memcpy(f+fl,ta,6);fl+=6; memcpy(f+fl,bc,6);fl+=6;
+    f[fl++]=0x00;f[fl++]=0x00; f[fl++]=0x00;f[fl++]=0x00; RATES();
+  }
+  #undef RATES
+  return fl;
+}
+static void do_ping(const char*macs,int ch,const char*tmpl){
+  uint8_t ra[6], ta[6]={0x02,0xa5,0x56,0x00,0x00,0x01};
+  if(!parse_mac(macs,ra)){ printf("P %s -1\n",macs); fflush(stdout); return; }
+  rx_probe("ping-pre");                                                      // does the proven RX path see frames in this context at all?
+  if(ch!=6){ do_setch(ch); do_rck(0); do_rck(1); }                           // ch6 = bring-up channel: RX already armed, a retune here kills it
+  // TX only RADIATES after live PA calibration — a bare inject reaches USB but not the air (why the first cut
+  // returned all-X). Run the chain that made tx_mark radiate (899/900), on the target channel, before injecting.
+  if(!getenv("PINGNOCAL")){ initcal(); iqk_chain(0); iqk_chain(1); tssi_live(); dpk_live_run(); }
+  // Directed probe-request to the target. Management frames ARE forwarded to the host (unlike CTS/ACK, which
+  // this chip does not deliver in monitor mode), so we detect the AP's probe-RESPONSE back to our TA.
+  uint8_t pkt[192]; memcpy(pkt,TXD48,48);                                     // 48B txdesc + up to ~64B frame body (beacon/assoc are the largest)
+  uint8_t*f=pkt+48;
+  int fl=build_frame(f,tmpl?tmpl:"probe",ra,ta);                             // template-selected low-level frame
+  pkt[8]=fl&0xff; pkt[9]=(fl>>8)&0xff;                                        // TXPKTSIZE
+  int plen=48+fl;
+  uint32_t savf=r32(0xce20); w32(0xce20,0xffffffff); P("  ce20: 0x%x -> 0x%x\n",savf,r32(0xce20));   // accept CONTROL frames; verify it took
+  int replies=0, ctrl=0, seen=0, rxpre=0, txok=0, txerr=0;
+  for(int k=0;k<12;k++){ uint8_t rb[16384]; int tr=0;                        // pure RX before any inject — is RX alive here?
+    if(libusb_bulk_transfer(dev,0x84,rb,sizeof rb,&tr,60)==0 && tr>=4){ int off=0,g=0;
+      while(off+16<=tr && g++<128){ uint32_t d0=rb[off]|(rb[off+1]<<8)|(rb[off+2]<<16)|((uint32_t)rb[off+3]<<24);
+        int ps=d0&0x3fff,rt2=(d0>>24)&0xf,sh=(d0>>14)&3,ds=(d0>>28)&7,rl=((d0>>31)&1)?32:16; if(ps==0)break;
+        if(rt2==0)rxpre++; int uu=rl+ds*8+sh+ps; uu=(uu+7)&~7; off+=uu; } } }
+  int reps=getenv("TXREPS")?atoi(getenv("TXREPS")):40;                       // long burst (TXREPS) lets a 2nd monitor catch the TX
+  for(int k=0;k<reps;k++){ int tr=0; int txrc=libusb_bulk_transfer(dev,0x05,pkt,plen,&tr,50); if(txrc==0)txok++; else txerr++; }
+  for(int k=0;k<40;k++){ uint8_t rb[16384]; int tr=0;                        // then listen continuously (responses are buffered)
+    if(libusb_bulk_transfer(dev,0x84,rb,sizeof rb,&tr,50)==0 && tr>=4){
+      int off=0,guard=0;
+      while(off+16<=tr && guard++<128){ uint32_t d0=rb[off]|(rb[off+1]<<8)|(rb[off+2]<<16)|((uint32_t)rb[off+3]<<24);
+        int pktsize=d0&0x3fff, shift=(d0>>14)&3, rt=(d0>>24)&0xf, drvsize=(d0>>28)&7, rxdlen=((d0>>31)&1)?32:16;
+        if(pktsize==0) break; int foff=off+rxdlen+drvsize*8+shift;
+        if(rt==0 && pktsize>=24 && foff+pktsize<=tr){ seen++; uint8_t fc0=rb[foff]; int typ=(fc0>>2)&3, sub=(fc0>>4)&0xf;
+          if((fc0&0x0c)==0x04) ctrl++;                                       // any control frame (diag)
+          if(typ==0 && sub==5 && memcmp(rb+foff+4,ta,6)==0) replies++; }     // probe-RESPONSE addressed to our TA
+        else if(rt==0 && pktsize>=10) seen++;
+        int unit=rxdlen+drvsize*8+shift+pktsize; unit=(unit+7)&~7; off+=unit; } }
+  }
+  w32(0xce20,savf);                                                          // restore the monitor RX filter
+  printf("P %s %d ctrl=%d seen=%d rxpre=%d txok=%d txerr=%d tmpl=%s\n",macs,replies,ctrl,seen,rxpre,txok,txerr,tmpl?tmpl:"probe"); fflush(stdout);
+}
+
 // The captured-config replay loop, shared by main()'s box/termux path and the RF_LIB JNI bring-up: walk the
 // blob from startByte applying control writes(1)/reads(3)/polls(4)/bulks(2), with the 0x2f0 re-fwdl hwburst
 // substitution, the 0x1bff8 IQK/DPK done-poll, and the ep7 fwdl section burst. Aborts on wedge / 30 consec fails.
@@ -662,6 +781,8 @@ int main(int argc,char**argv){
   }
   // 0x84: walk AGGREGATED rxd units per transfer (rxd_short16/long32, frame off=rxdlen+drvsize*8+shift),
   // for WIFI(rt=0) units print 802.11 frame-control + addr3(BSSID). Dump first 6 raw transfers for offline check.
+  // PINGTEST="<mac> <ch>": one RTS active-ping after bring-up, then exit — a deterministic non-interactive test.
+  if(getenv("PINGTEST")){ char pm[40]={0},pt[16]="probe"; int pch=0; int nn=sscanf(getenv("PINGTEST"),"%39s %d %15s",pm,&pch,pt); if(nn>=2 && pch>0) do_ping(pm,pch,pt); else P("PINGTEST: bad arg\n"); return 0; }
   // SETCH: one live retune off the ch6 bring-up, confirmed by RX + timed. SWEEP: a full band pass, timed.
   if(getenv("SETCH")){ int ch=atoi(getenv("SETCH"));
     struct timespec a,b; clock_gettime(CLOCK_MONOTONIC,&a); do_setch(ch);
@@ -686,14 +807,18 @@ int main(int argc,char**argv){
       n,tot,tot/n,setsum/n,dwell,hits,n); return 0; }
   // SCAN: hop the plan (do_setch + RCK per channel) and dump every EP0x84 transfer as `R <hex>` on stdout, for a
   // Deno pass to parse into an airodump table. LOG (chip chatter) stays on the log file; only R-lines hit stdout.
-  if(getenv("SCAN")){ int chs[]={1,2,3,4,5,6,7,8,9,10,11,12,13,36,40,44,48,149,153,157,161,165};
-    int n=(getenv("SCAN5")&&getenv("SCAN5")[0])?22:13, dwell=getenv("DWELL")?atoi(getenv("DWELL")):500, loop=getenv("LOOP")?1:0;
-    const char*ctl=getenv("CTL"); int idx=0;                   // CTL = optional control file: a channel to LOCK onto (0/none = hop)
+  if(getenv("SCAN")){ int chs[]={1,2,3,4,5,6,7,8,9,10,11,12,13,
+      36,40,44,48, 52,56,60,64, 100,104,108,112,116,120,124,128,132,136,140,144, 149,153,157,161,165}; // 2.4 + full 5GHz incl DFS
+    int n=(getenv("SCAN5")&&getenv("SCAN5")[0])?38:13, dwell=getenv("DWELL")?atoi(getenv("DWELL")):500, loop=getenv("LOOP")?1:0;
+    const char*ctl=getenv("CTL"), *pingf=getenv("PING"); int idx=0;   // CTL = channel LOCK file; PING = "<mac> <ch>" RTS-ping request
     do {
       if(loop && getppid()==1) break;                          // parent (termux-usb) gone -> don't orphan-spin holding the device
+      if(pingf){ FILE*pf=fopen(pingf,"r"); if(pf){ char pm[40]={0},pt[16]="probe"; int pch=0,okp=(fscanf(pf,"%39s %d %15s",pm,&pch,pt)>=2); fclose(pf);
+        if(okp && pm[0]!='-' && pch>0){ do_ping(pm,pch,pt); FILE*wf=fopen(pingf,"w"); if(wf){fputc('-',wf);fclose(wf);} } } }  // service a ping, then clear it
       int lock=0,dov=0; if(ctl){ FILE*cf=fopen(ctl,"r"); if(cf){ if(fscanf(cf,"%d %d",&lock,&dov)<1) lock=0; fclose(cf); } }  // re-read each dwell -> live lock + dwell
       int dw = dov>0 ? dov : dwell, ch = lock>0 ? lock : chs[idx++ % n];
       do_setch(ch); do_rck(0); do_rck(1);
+      if(idx<=n && !lock){ P("  [scan] ch%-3d 0x1e0=0x%x 0x1c060=0x%x\n",ch,r32(0x1e0),r32(0x1c060)); } // first sweep: per-channel health (DFS check)
       printf("C %d\n",ch); fflush(stdout);                     // channel marker: R-lines until the next C are on `ch`
       struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
       for(;;){ uint8_t rb[16384]; int tr=0;

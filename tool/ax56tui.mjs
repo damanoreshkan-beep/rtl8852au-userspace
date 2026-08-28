@@ -20,6 +20,9 @@ const unassoc = new Map();   // mac    -> { rssi, count, last, probes:Set }
 let curCh = 0, totalFr = 0, paused = false, dwell = 300;
 const band5 = true;   // always scan 2.4 + 5 GHz, every channel
 let lockedCh = 0, sortMode = 0, prevFr = 0, prevT = Date.now(), pps = 0, spinI = 0;
+let selMac = null, pingWait = null, flatSta = [];   // station selection + RTS-ping state
+const pingRes = new Map();                           // mac -> { n: replies, at }
+const PING = `${TOOL}/ax56tui.ping`;
 const SORTS = [["ch", "channel"], ["sig", "signal"], ["cli", "clients"], ["data", "packets"]];
 const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 const CTL = `${TOOL}/ax56tui.ctl`;
@@ -47,8 +50,8 @@ function seenClient(bssid, mac, u, assoc) {
 function seenProbe(mac, u) {
   if (mac === BCAST || mac === NIL) return;
   for (const ap of aps.values()) if (ap.clients.has(mac)) return;   // already an associated client
-  const c = unassoc.get(mac) || { rssi: null, count: 0, last: 0, probes: new Set(), vend: new Set(), tags: new Set(), he: false };
-  c.count++; c.last = now(); if (u.rssi != null) c.rssi = ema(c.rssi, u.rssi); if (u.ssid) c.probes.add(u.ssid);
+  const c = unassoc.get(mac) || { rssi: null, count: 0, last: 0, probes: new Set(), vend: new Set(), tags: new Set(), he: false, lastCh: 0 };
+  c.count++; c.last = now(); c.lastCh = curCh || c.lastCh; if (u.rssi != null) c.rssi = ema(c.rssi, u.rssi); if (u.ssid) c.probes.add(u.ssid);
   for (const o of u.vend || []) c.vend.add(o);
   for (const t of u.tags || []) c.tags.add(t); if (u.he) c.he = true;
   unassoc.set(mac, c);
@@ -62,6 +65,7 @@ function ingest(u) {
 }
 function feedLine(line) {
   if (line[0] === "C") { curCh = parseInt(line.slice(2)) || curCh; return; }
+  if (line[0] === "P") { const p = line.split(" "); if (p[1]) pingRes.set(p[1], { n: parseInt(p[2]) || 0, at: now() }); if (pingWait === p[1]) pingWait = null; return; }
   if (line[0] === "R") { const hx = line.slice(2).trim(); if (hx.length >= 32) { const b = new Uint8Array(hx.length / 2); for (let i = 0; i < b.length; i++) b[i] = parseInt(hx.slice(i * 2, i * 2 + 2), 16); for (const u of parseUnits(b)) ingest(u); } }
 }
 
@@ -116,6 +120,9 @@ function render() {
   // the MAP: APs sorted by the chosen key, each AP with its clients nested
   const sorters = { ch: (x, y) => (x.ch - y.ch) || ((y.rssi ?? -999) - (x.rssi ?? -999)), sig: (x, y) => (y.rssi ?? -999) - (x.rssi ?? -999), cli: (x, y) => (y.clients.size - x.clients.size) || ((y.rssi ?? -999) - (x.rssi ?? -999)), data: (x, y) => y.count - x.count };
   const apList = [...aps.entries()].map(([b, d]) => ({ b, ...d })).sort(sorters[SORTS[sortMode][0]]);
+  const flat = [];   // stations in render order, for j/k selection + ping
+  const pingTag = (m) => { const p = pingRes.get(m); if (pingWait === m) return ` ${c.warn}…${c.reset}`; if (!p || now() - p.at > 15000) return ""; return p.n > 0 ? ` ${c.ok}●${p.n}${c.reset}` : ` ${c.bad}✗${c.reset}`; };
+  const selMk = (m) => m === selMac ? `${c.accent}▸${c.reset}` : " ";
   for (const a of apList) {
     if (out.length >= H - 3) { push(`${c.dim} … more${c.reset}`); break; }
     const s = sigColor(a.rssi);
@@ -124,7 +131,8 @@ function render() {
     const cls = [...a.clients.entries()].map(([m, d]) => ({ m, ...d })).sort((x, y) => (y.rssi ?? -999) - (x.rssi ?? -999));
     for (const cl of cls) {
       if (out.length >= H - 3) break;
-      push(`${" ".repeat(indent)}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${nameFor(cl.m, cl.vend)}${showData ? " " + c.mute + cl.count + c.reset : ""}`);
+      flat.push({ mac: cl.m, ch: a.ch });
+      push(`${selMk(cl.m)}${" ".repeat(Math.max(0, indent - 1))}${sigColor(cl.rssi)}${rpad4(cl.rssi)}${c.reset} ${c.dim}└${c.reset}${nameFor(cl.m, cl.vend)}${showData ? " " + c.mute + cl.count + c.reset : ""}${pingTag(cl.m)}`);
     }
   }
   // unassociated (probing) stations
@@ -136,10 +144,12 @@ function render() {
       if (out.length >= H - 2) { push(`${c.dim} … +${un.length - shown}${c.reset}`); break; }
       shown++;
       const pr = [...u.probes].filter(Boolean).slice(0, 2).join(" ");
-      push(`${" ".repeat(indent)}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m, u.vend, { tags: u.tags, he: u.he, vend: [...u.vend] })}${pr && W >= 52 ? c.dim + " →" + clip(pr, W - 30) + c.reset : ""}`);
+      flat.push({ mac: u.m, ch: u.lastCh || curCh });
+      push(`${selMk(u.m)}${" ".repeat(Math.max(0, indent - 1))}${sigColor(u.rssi)}${rpad4(u.rssi)}${c.reset} ${nameFor(u.m, u.vend, { tags: u.tags, he: u.he, vend: [...u.vend] })}${pingTag(u.m)}${pr && W >= 58 ? c.dim + " →" + clip(pr, W - 40) + c.reset : ""}`);
     }
   }
-  const footer = clip(`q·quit p·pause c·lock ,.·ch s·${SORTS[sortMode][1]} [ ]·${dwell}ms`, W);
+  flatSta = flat;
+  const footer = clip(`q·quit j/k·sta t·ping c·lock ,.·ch s·${SORTS[sortMode][1]} p·pause [ ]·${dwell}`, W);
   let buf = E + "H" + E + "0J" + out.join(E + "0K\r\n") + E + "0K\r\n" + E + `${H};1H` + c.dim + footer + c.reset + E + "0K";
   Deno.stdout.writeSync(new TextEncoder().encode(buf));
 }
@@ -159,6 +169,7 @@ async function startLive() {
   status = "tap the USB permission popup… then cold bring-up ~20s";
   try { await new Deno.Command("mkfifo", { args: [FIFO] }).output(); } catch { /* exists */ }
   writeCtl();                                                  // hand the fresh scanner the current lock + dwell
+  try { Deno.writeTextFileSync(PING, "-"); } catch { /* */ }   // no stale ping
   const env = { ...Deno.env.toObject(), DWELL: String(dwell), LOOP: "1", SCAN5: "1" };   // always 2.4 + 5 GHz
   child = new Deno.Command("termux-usb", { args: ["-r", "-e", `${TOOL}/stream_cb.sh`, device], stdout: "null", stderr: "null", env }).spawn();
   child.status.then(() => { if (!paused) status = "adapter released — 5/p restart · q quit"; });
@@ -183,7 +194,8 @@ async function keys() {
   const b = new Uint8Array(8);
   while (true) {
     const n = await Deno.stdin.read(b); if (n === null) break;
-    const k = String.fromCharCode(b[0]);
+    let k = String.fromCharCode(b[0]);
+    if (b[0] === 27 && b[1] === 91) k = b[2] === 66 ? "j" : b[2] === 65 ? "k" : k;   // ↓ / ↑ arrows -> j / k
     if (k === "q" || b[0] === 3) { cleanup(); stopLive(); Deno.exit(0); }
     else if (k === "p" && !replay) { paused = !paused; if (paused) stopLive(); else await startLive(); }
     else if (k === "[") { dwell = Math.max(120, dwell - 60); writeCtl(); }
@@ -191,6 +203,8 @@ async function keys() {
     else if (k === "c") { setLock(lockedCh ? 0 : (curCh || HOPCH()[0])); }
     else if (k === "," || k === ".") { const list = HOPCH(); let i = list.indexOf(lockedCh || curCh); if (i < 0) i = 0; i = (i + (k === "." ? 1 : list.length - 1)) % list.length; setLock(list[i]); }
     else if (k === "s") { sortMode = (sortMode + 1) % SORTS.length; }
+    else if ((k === "j" || k === "k") && flatSta.length) { const i = flatSta.findIndex((x) => x.mac === selMac); const j = i < 0 ? 0 : (i + (k === "j" ? 1 : flatSta.length - 1)) % flatSta.length; selMac = flatSta[j].mac; }
+    else if ((k === "t" || b[0] === 13) && !replay) { const s = flatSta.find((x) => x.mac === selMac); if (s && s.ch > 0) { pingWait = selMac; try { Deno.writeTextFileSync(PING, `${selMac} ${s.ch}`); } catch { /* */ } } }
   }
 }
 
